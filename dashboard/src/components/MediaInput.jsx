@@ -103,7 +103,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
             <div className="flex gap-4 sm:gap-6 mb-6 border-b border-rule">
                 <button
                     onClick={() => setMode('file')}
-                    className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'file'
+                    className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm whitespace-nowrap transition-colors ${mode === 'file'
                         ? 'text-ink border-brass'
                         : 'text-muted border-transparent hover:text-ink2'
                         }`}
@@ -114,7 +114,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                 {youtubeUrlEnabled && (
                     <button
                         onClick={() => setMode('url')}
-                        className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm lowercase whitespace-nowrap transition-colors ${mode === 'url'
+                        className={`flex items-center gap-2 pb-3 px-1 -mb-px border-b-2 text-sm whitespace-nowrap transition-colors ${mode === 'url'
                             ? 'text-ink border-brass'
                             : 'text-muted border-transparent hover:text-ink2'
                             }`}
@@ -192,7 +192,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                     className="hidden"
                                 />
                                 <Upload className="mx-auto mb-3 text-muted" size={18} />
-                                <p className="text-ink2 lowercase">Click to upload or drag and drop</p>
+                                <p className="text-ink2">Click to upload or drag and drop</p>
                                 <p className="readout mt-2">MP4, MOV up to 500MB</p>
                             </label>
                         )}
@@ -240,10 +240,10 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     <button
                         type="button"
                         onClick={() => setShowAdvanced((v) => !v)}
-                        className="flex items-center gap-1.5 text-xs text-muted hover:text-ink2 lowercase transition-colors"
+                        className="flex items-center gap-1.5 text-sm text-muted hover:text-ink2 transition-colors"
                     >
                         <ChevronDown size={14} className={`transition-transform ${showAdvanced ? 'rotate-180' : ''}`} />
-                        advanced options
+                        Advanced Options
                         {(targetClips || clipMinSeconds || clipMaxSeconds || !autoHook) && (
                             <span className="text-brass">·</span>
                         )}
@@ -251,7 +251,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                     {showAdvanced && (
                         <div className="mt-3 grid grid-cols-3 gap-2 animate-fade">
                             <div>
-                                <p className="eyebrow mb-1.5">clips to aim for</p>
+                                <p className="eyebrow mb-1.5">Clips to Aim For</p>
                                 <input
                                     type="number" min="1" max="15" step="1"
                                     value={targetClips}
@@ -261,7 +261,7 @@ export default function MediaInput({ onProcess, isProcessing }) {
                                 />
                             </div>
                             <div>
-                                <p className="eyebrow mb-1.5">min length (s)</p>
+                                <p className="eyebrow mb-1.5">Min Length (s)</p>
                                 <input
                                     type="number" min="5" max="175" step="1"
                                     value={clipMinSeconds}

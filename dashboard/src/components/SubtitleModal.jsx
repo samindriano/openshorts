@@ -39,9 +39,9 @@ const ANIMATION_OPTIONS = [
 ];
 
 const POSITION_OPTIONS = [
-    { value: 'top', label: 'top' },
-    { value: 'middle', label: 'middle' },
-    { value: 'bottom', label: 'bottom' },
+    { value: 'top', label: 'Top' },
+    { value: 'middle', label: 'Middle' },
+    { value: 'bottom', label: 'Bottom' },
 ];
 
 // Ready-made caption looks burned server-side as karaoke ASS (word highlight):
@@ -204,14 +204,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     };
 
     return (
-        <Modal isOpen={isOpen} onClose={onClose} size="xl" eyebrow="EDITOR · SUBTITLES" title="subtitles">
+        <Modal isOpen={isOpen} onClose={onClose} size="xl" eyebrow="EDITOR · SUBTITLES" title="Subtitles">
             <div className="flex flex-col md:flex-row gap-6">
                 {/* Left: Preview */}
                 <div className="flex-1 flex flex-col items-center justify-center bg-black rounded-card border border-rule overflow-hidden relative aspect-[9/16] max-h-[600px]">
                     {captionsLoading ? (
                         <div className="flex items-center gap-2 text-muted">
                             <Loader2 size={16} className="animate-spin" />
-                            <span className="text-sm lowercase">Loading preview...</span>
+                            <span className="text-sm">Loading Preview...</span>
                         </div>
                     ) : useRemotionPreview ? (
                         <RemotionPreview
@@ -491,9 +491,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                         <button
                                             onClick={onRemove}
                                             disabled={isProcessing}
-                                            className="text-xs text-muted underline underline-offset-2 lowercase hover:text-ink2 disabled:opacity-50"
+                                            className="text-sm text-muted underline underline-offset-2 hover:text-ink2 disabled:opacity-50"
                                         >
-                                            remove captions from this clip
+                                            Remove Captions From This Clip
                                         </button>
                                     )}
                                 </>

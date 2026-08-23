@@ -5,20 +5,20 @@
 
 :root {
   /* surfaces */
-  --color-paper: #fafaf8;
-  --color-paper-2: #f1f1ef;
-  --color-paper-3: #ececea;
-  --color-card: #ffffff;
+  --color-paper: #f4f4f1;
+  --color-paper-2: #ebebe7;
+  --color-paper-3: #e3e3de;
+  --color-card: #fafaf7;
 
   /* ink */
-  --color-ink: #1f1f1d;
-  --color-ink-2: #454541;
-  --color-muted: #6b6b67;
+  --color-ink: #20201e;
+  --color-ink-2: #3f3f3b;
+  --color-muted: #5f5f5a;
 
   /* rules */
-  --color-rule: #e4e4df;
-  --color-rule-2: #d2d2cc;
-  --rule-blueprint: #e9e9e5;
+  --color-rule: #dadad4;
+  --color-rule-2: #c9c9c2;
+  --rule-blueprint: #e0e0da;
 
   /* restrained brand accent */
   --color-accent: #e86f2a;

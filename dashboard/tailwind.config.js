@@ -9,13 +9,13 @@ export default {
       colors: {
         // Light neutral palette — values mirror tokens.css (kept literal so
         // Tailwind alpha modifiers like bg-brass/10 compile)
-        paper: "rgb(250 250 248 / <alpha-value>)",
-        paper2: "rgb(241 241 239 / <alpha-value>)",
-        paper3: "rgb(236 236 234 / <alpha-value>)",
-        card: "rgb(255 255 255 / <alpha-value>)",
-        ink: "rgb(31 31 29 / <alpha-value>)",
-        ink2: "rgb(69 69 65 / <alpha-value>)",
-        muted: "rgb(107 107 103 / <alpha-value>)",
+        paper: "rgb(244 244 241 / <alpha-value>)",
+        paper2: "rgb(235 235 231 / <alpha-value>)",
+        paper3: "rgb(227 227 222 / <alpha-value>)",
+        card: "rgb(250 250 247 / <alpha-value>)",
+        ink: "rgb(32 32 30 / <alpha-value>)",
+        ink2: "rgb(63 63 59 / <alpha-value>)",
+        muted: "rgb(95 95 90 / <alpha-value>)",
         brass: "rgb(232 111 42 / <alpha-value>)",
         brassink: "rgb(45 22 10 / <alpha-value>)",
         coral: "rgb(200 90 33 / <alpha-value>)",

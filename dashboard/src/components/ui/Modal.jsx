@@ -6,7 +6,7 @@ import { X } from 'lucide-react';
  *
  * Props:
  *  - isOpen / onClose
- *  - title (string, rendered lowercase serif) — optional
+ *  - title (string, rendered as a serif heading) — optional
  *  - eyebrow (string, mono UPPERCASE micro label above title) — optional
  *  - size: 'sm' | 'md' | 'lg' | 'xl' (max width; default 'md')
  *  - children: body content
@@ -43,7 +43,7 @@ export default function Modal({ isOpen, onClose, title, eyebrow, size = 'md', ch
         {(title || eyebrow) && (
           <div className="px-4 sm:px-6 pt-6 pb-4 border-b border-rule shrink-0">
             {eyebrow && <p className="eyebrow mb-1.5">{eyebrow}</p>}
-            {title && <h2 className="font-display lowercase text-2xl text-ink leading-tight break-words pr-8">{title}</h2>}
+            {title && <h2 className="font-display text-2xl text-ink leading-tight break-words pr-8">{title}</h2>}
           </div>
         )}
         <div className="px-4 sm:px-6 py-5 overflow-y-auto custom-scrollbar grow">

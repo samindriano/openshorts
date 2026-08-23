@@ -896,7 +896,7 @@ function App() {
           <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
             <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
           </div>
-          <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
+          <span className="font-display text-lg text-ink hidden lg:block">OpenShorts</span>
         </a>
 
         <nav className="flex-1 px-4 py-4 space-y-1">
@@ -913,7 +913,7 @@ function App() {
                   <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
                 )}
                 <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
-                <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
+                <span className="text-sm hidden lg:block flex-1 text-left truncate">{item.label}</span>
                 {item.byok && <span className="readout hidden lg:block">BYOK</span>}
                 <span className="readout hidden lg:block">{item.ord}</span>
               </button>
@@ -924,32 +924,32 @@ function App() {
         <div className="p-4 border-t border-rule space-y-1">
           <a
             href="#landing"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <Globe size={14} className="shrink-0" />
-            <span className="hidden lg:block truncate">landing page</span>
+            <span className="hidden lg:block truncate">Landing Page</span>
           </a>
           <a
             href="https://github.com/mutonby/openshorts"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-            <span className="hidden lg:block truncate">open source</span>
+            <span className="hidden lg:block truncate">Open Source</span>
           </a>
           {billingEnabled && (
             <a
               href="#/pricing"
-              className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
             >
               <Sparkles size={14} className="shrink-0" />
-              <span className="hidden lg:block truncate">plans &amp; pricing</span>
+              <span className="hidden lg:block truncate">Plans &amp; Pricing</span>
             </a>
           )}
           <a
             href="mailto:info@openshorts.app"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <Mail size={14} className="shrink-0" />
             <span className="hidden lg:block truncate">info@openshorts.app</span>
@@ -1085,7 +1085,7 @@ function App() {
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
                 <div>
                   <p className="eyebrow mb-1.5">07 · SETTINGS</p>
-                  <h1 className="font-display lowercase text-2xl text-ink">Settings</h1>
+                  <h1 className="font-display text-2xl text-ink">Settings</h1>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted mt-1">
                   <Shield size={12} className="text-ok shrink-0" /> Privacy: keys only live in your browser (sent to backend just to process)
@@ -1098,7 +1098,7 @@ function App() {
                       <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                         <Shield size={16} className="text-brass" />
                       </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Included in your plan</h2>
+                      <h2 className="text-base font-medium text-ink">Included in your plan</h2>
                     </div>
                     <span className="badge-ok">Managed</span>
                   </div>
@@ -1123,7 +1123,7 @@ function App() {
                       <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                         <Sparkles size={16} className="text-brass" />
                       </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Choose your plan</h2>
+                      <h2 className="text-base font-medium text-ink">Choose your plan</h2>
                     </div>
                     <span className="badge-ok">Free plan available</span>
                   </div>
@@ -1144,7 +1144,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Share2 size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
+                    <h2 className="text-base font-medium text-ink">Social Integration</h2>
                   </div>
                   <span className="badge-warn">Required</span>
                 </div>
@@ -1199,7 +1199,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Globe size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Video Translation</h2>
+                    <h2 className="text-base font-medium text-ink">Video Translation</h2>
                   </div>
                   <span className="readout">BYOK</span>
                 </div>
@@ -1256,7 +1256,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Sparkles size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">AI Shorts (UGC Videos)</h2>
+                    <h2 className="text-base font-medium text-ink">AI Shorts (UGC Videos)</h2>
                   </div>
                   <span className="readout">BYOK</span>
                 </div>
@@ -1325,7 +1325,7 @@ function App() {
                   <p className="eyebrow flex items-center gap-2">
                     <Bot size={12} /> 03 · AI AGENT · AUTONOMOUS SKILL
                   </p>
-                  <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
+                  <h1 className="font-display text-3xl md:text-4xl text-ink">
                     Your Personal Clipping Team
                   </h1>
                   <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
@@ -1350,7 +1350,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Upload size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">1. Drop your videos</h3>
+                    <h3 className="font-medium text-ink">1. Drop Your Videos</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Put your long-form vertical footage in the watched folder. The skill picks one video per run.
                     </p>
@@ -1360,7 +1360,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Users size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">2. AI clippers work</h3>
+                    <h3 className="font-medium text-ink">2. AI Clippers Work</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.
                     </p>
@@ -1370,7 +1370,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <CheckCircle2 size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">3. You validate, it ships</h3>
+                    <h3 className="font-medium text-ink">3. You Validate, It Ships</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.
                     </p>
@@ -1381,7 +1381,7 @@ function App() {
                 <div className="card p-6 md:p-8 space-y-5">
                   <div className="flex items-start justify-between gap-4 flex-wrap">
                     <div>
-                      <h2 className="font-display lowercase text-xl text-ink mb-1">skill-autoshorts</h2>
+                      <h2 className="font-display text-xl text-ink mb-1">Skill-AutoShorts</h2>
                       <p className="text-sm text-muted">
                         The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.
                       </p>
@@ -1476,7 +1476,7 @@ function App() {
               <div className="max-w-xl w-full text-center space-y-8">
                 <div className="space-y-4">
                   <p className="eyebrow">01 · CLIP GENERATOR</p>
-                  <h1 className="font-display lowercase text-4xl md:text-5xl text-ink">
+                  <h1 className="font-display text-4xl md:text-5xl text-ink">
                     Create Viral Shorts
                   </h1>
                   <p className="text-muted text-lg">
@@ -1498,12 +1498,12 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row gap-4 p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
+            <div className="h-full flex flex-col md:flex-row gap-6 p-5 sm:p-6 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
 
               {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
-                <div className="mb-6 flex items-center justify-between">
-                  <h2 className="text-sm font-medium text-ink lowercase flex items-center gap-2">
+              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                <div className="mb-7 flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-ink flex items-center gap-2">
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
                     Live Analysis
                   </h2>
@@ -1561,8 +1561,8 @@ function App() {
               </div>
 
               {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 transition-all duration-700 ease-in-out`}>
-                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
+              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 transition-all duration-700 ease-in-out`}>
+                <h2 className="font-display text-2xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
                   Generated Shorts
                   {results?.clips?.length > 0 && (
                     <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-auto">
@@ -1583,8 +1583,8 @@ function App() {
                         title="Download all clips as a ZIP"
                       >
                         {downloadingAll
-                          ? <><Loader2 size={14} className="animate-spin" />zipping…</>
-                          : <><Download size={14} />download all</>}
+                          ? <><Loader2 size={14} className="animate-spin" />Zipping…</>
+                          : <><Download size={14} />Download All</>}
                       </button>
                       {results.clips.length > 1 && (
                         <button
@@ -1592,7 +1592,7 @@ function App() {
                           className="btn-primary px-4 py-2 text-xs"
                         >
                           <Calendar size={14} />
-                          schedule week
+                          Schedule Week
                         </button>
                       )}
                     </div>
@@ -1624,9 +1624,9 @@ function App() {
                         </div>
                         <button
                           onClick={() => { track('SocialNudgeConnect'); handleConnectSocials(); }}
-                          className="btn-quiet shrink-0 text-xs py-1.5 px-3 lowercase"
+                          className="btn-quiet shrink-0 text-xs py-1.5 px-3"
                         >
-                          connect socials →
+                          Connect Socials →
                         </button>
                         <button
                           onClick={() => {
@@ -1654,7 +1654,7 @@ function App() {
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
                   {results && results.clips && results.clips.length > 0 ? (
-                    <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
+                    <div className="grid grid-cols-1 gap-5 pb-10">
                       {results.clips.map((clip, i) => (
                         <ResultCard
                           key={`${jobId}-${i}-${clip.video_url || ''}`}
@@ -1686,7 +1686,7 @@ function App() {
                     status === 'processing' ? (
                       <div className="h-full flex flex-col items-center justify-center text-muted space-y-4">
                         <Loader2 size={32} className="animate-spin text-brass" />
-                        <p className="text-sm lowercase">Waiting for clips...</p>
+                        <p className="text-sm">Waiting for Clips...</p>
                       </div>
                     ) : status === 'error' ? (
                       <div className="h-full flex flex-col items-center justify-center text-danger space-y-2">

@@ -11,12 +11,12 @@ import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 
-const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
+const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1.5 py-2.5 px-2 rounded-input border border-rule hover:bg-paper3 text-xs font-medium text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
 const PLATFORM_OPTIONS = [
-    { value: 'tiktok', label: 'tiktok', icon: <Video size={16} /> },
-    { value: 'instagram', label: 'instagram', icon: <Instagram size={16} /> },
-    { value: 'youtube', label: 'youtube', icon: <Youtube size={16} /> },
+    { value: 'tiktok', label: 'TikTok', icon: <Video size={16} /> },
+    { value: 'instagram', label: 'Instagram', icon: <Instagram size={16} /> },
+    { value: 'youtube', label: 'YouTube', icon: <Youtube size={16} /> },
 ];
 
 function clipDurationSeconds(clip) {
@@ -704,9 +704,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const durationReadout = formatDuration(clip);
 
     return (
-        <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[420px]" style={{ animationDelay: `${index * 0.1}s` }}>
+        <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[480px]" style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Left: Video Preview — 9:16 column matching the fixed card height */}
-            <div className="w-full md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
+            <div className="w-full md:w-[260px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
                     ref={videoRef}
                     src={playbackUrl}
@@ -753,16 +753,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {isEditing && (
                     <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-10 p-4 text-center">
                         <Loader2 size={28} className="text-brass animate-spin mb-3" />
-                        <span className="text-xs text-ink lowercase">ai magic in progress…</span>
+                        <span className="text-sm text-ink font-medium">AI Magic in Progress…</span>
                         <span className="readout mt-1.5">APPLYING VIRAL EDITS · ZOOMS</span>
                     </div>
                 )}
             </div>
 
             {/* Right: Content & Details */}
-            <div className="flex-1 p-4 md:p-5 flex flex-col overflow-hidden min-w-0">
+            <div className="flex-1 p-5 md:p-6 flex flex-col overflow-hidden min-w-0">
                 <div className="mb-4">
-                    <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
+                    <h3 className="text-lg font-semibold text-ink leading-tight line-clamp-2 mb-2.5 break-words" title={clip.video_title_for_youtube_short}>
                         {clip.video_title_for_youtube_short || "Viral Clip Generated"}
                     </h3>
                     <div className="flex flex-wrap gap-1.5">
@@ -777,7 +777,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 <div className="flex-1 min-h-0 space-y-2 mb-4">
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0">
                         <span className="eyebrow shrink-0">YOUTUBE</span>
-                        <p className="text-xs text-ink2 truncate flex-1 min-w-0">
+                        <p className="text-sm text-ink2 truncate flex-1 min-w-0">
                             {clip.video_title_for_youtube_short || "Viral Short Video"}
                         </p>
                         <button
@@ -791,7 +791,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0">
                         <span className="eyebrow shrink-0">TIKTOK · IG</span>
-                        <p className="text-xs text-ink2 truncate flex-1 min-w-0">
+                        <p className="text-sm text-ink2 truncate flex-1 min-w-0">
                             {clip.video_description_for_tiktok || clip.video_description_for_instagram}
                         </p>
                         <button
@@ -805,9 +805,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
                     <button
                         onClick={() => setShowDescModal(true)}
-                        className="w-full flex items-center justify-center gap-2 py-2 rounded-input border border-dashed border-rule text-xs lowercase text-muted hover:text-brass hover:border-rule2 transition-colors"
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-input border border-dashed border-rule text-sm text-muted hover:text-brass hover:border-rule2 transition-colors"
                     >
-                        <FileText size={14} /> view descriptions
+                        <FileText size={14} /> View Descriptions
                     </button>
                 </div>
 
@@ -827,7 +827,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             className={QUIET_BTN}
                         >
                             <Scissors size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
-                            edit clip
+                            Edit Clip
                         </button>
                     )}
 
@@ -837,7 +837,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             className={QUIET_BTN}
                         >
                             <Crosshair size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
-                            reframing
+                            Reframing
                         </button>
                     )}
 
@@ -847,7 +847,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isEditing ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isEditing ? 'editing…' : 'auto edit'}
+                        {isEditing ? 'Editing…' : 'Auto Edit'}
                     </button>
 
                     <button
@@ -856,7 +856,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isSubtitling ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Type size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isSubtitling ? 'adding…' : 'subtitles'}
+                        {isSubtitling ? 'Adding…' : 'Subtitles'}
                     </button>
 
                     <button
@@ -865,7 +865,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isHooking ? 'adding…' : 'viral hook'}
+                        {isHooking ? 'Adding…' : 'Viral Hook'}
                     </button>
 
                     <button
@@ -874,14 +874,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isTranslating ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Languages size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isTranslating ? 'translating…' : 'dub voice'}
+                        {isTranslating ? 'Translating…' : 'Dub Voice'}
                     </button>
 
                     <button
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2 px-1 text-[11px] rounded-input whitespace-nowrap"
                     >
-                        <Share2 size={16} className="shrink-0" /> post
+                        <Share2 size={16} className="shrink-0" /> Post
                     </button>
                     <button
                         onClick={(e) => {
@@ -896,7 +896,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         }}
                         className={`${QUIET_BTN}${onEditClip ? ' col-span-2' : ''}`}
                     >
-                        <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" /> download
+                        <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" /> Download
                     </button>
                 </div>
             </div>
@@ -906,7 +906,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 isOpen={showDescModal}
                 onClose={() => setShowDescModal(false)}
                 eyebrow="GENERATED COPY"
-                title="descriptions"
+                title="Descriptions"
                 size="md"
             >
                 <div className="space-y-4">
@@ -949,12 +949,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 isOpen={showModal}
                 onClose={() => setShowModal(false)}
                 eyebrow="PUBLISH"
-                title="post clip"
+                title="Post Clip"
                 size="md"
                 footer={
                     noAccountsConnected ? (
                         <button onClick={handleConnectAccounts} className="btn-primary w-full">
-                            <Link2 size={16} /> connect accounts
+                            <Link2 size={16} /> Connect Accounts
                         </button>
                     ) : (
                         <button
@@ -962,7 +962,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             disabled={posting || !canPost}
                             className="btn-primary w-full"
                         >
-                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'scheduling…' : 'publishing…'}</> : <><Share2 size={16} /> {isScheduling ? 'schedule post' : 'publish now'}</>}
+                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling…' : 'Publishing…'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
                         </button>
                     )
                 }
@@ -970,14 +970,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {!canPost && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">configure api key in settings first.</div>
+                        <div>Configure API Key in Settings first.</div>
                     </div>
                 )}
 
                 {noAccountsConnected && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">no social accounts connected yet — link tiktok, instagram or youtube to publish this clip.</div>
+                        <div>No social accounts connected yet — link TikTok, Instagram, or YouTube to publish this clip.</div>
                     </div>
                 )}
 
@@ -988,11 +988,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {platforms.tiktok && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
-                        <div className="lowercase">
-                            tiktok arrives as a <b className="text-ink">draft</b>, not a live post — you'll
-                            get a notification in the app. finishing it there lets you add trending
-                            sounds, effects and hashtags, which reaches more people than posting
-                            straight from an api.
+                        <div>
+                            TikTok arrives as a <b className="text-ink">draft</b>, not a live post — you'll
+                            get a notification in the app. Finishing it there lets you add trending
+                            sounds, effects, and hashtags, which reaches more people than posting
+                            straight from an API.
                         </div>
                     </div>
                 )}
@@ -1006,7 +1006,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             value={postTitle}
                             onChange={(e) => setPostTitle(e.target.value)}
                             className="input-field"
-                            placeholder="enter a catchy title…"
+                            placeholder="Enter a catchy title…"
                         />
                     </div>
 
@@ -1017,15 +1017,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             onChange={(e) => setPostDescription(e.target.value)}
                             rows={4}
                             className="input-field resize-none"
-                            placeholder="write a caption for your post…"
+                            placeholder="Write a caption for your post…"
                         />
                     </div>
 
                     {/* Scheduling */}
                     <div className="p-3 bg-paper rounded-input border border-rule">
                         <label className="flex items-center justify-between cursor-pointer">
-                            <span className="flex items-center gap-2 text-sm text-ink2 lowercase">
-                                <Calendar size={16} className={isScheduling ? 'text-brass' : 'text-muted'} /> schedule post
+                            <span className="flex items-center gap-2 text-sm text-ink2">
+                                <Calendar size={16} className={isScheduling ? 'text-brass' : 'text-muted'} /> Schedule Post
                             </span>
                             <input
                                 type="checkbox"

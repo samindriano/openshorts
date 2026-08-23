@@ -17,8 +17,20 @@ controls, animations, API calls, and video/render-specific colors were
 preserved. Shared tokens in `dashboard/src/tokens.css` and
 `dashboard/tailwind.config.js` now use warm off-white surfaces, graphite text,
 neutral borders, semantic state colors, and a restrained burnt-orange accent.
-Cards no longer use the previous radial orange glow. This is intentionally a
-visual review checkpoint, not a second layout redesign.
+Cards no longer use the previous radial orange glow. The initial palette pass
+intentionally preserved the layout; the follow-up readability pass is recorded
+below.
+
+## Dashboard readability refinement
+
+After the palette review, the dashboard received a small readability pass on
+`custom/tiktok-finance`: the neutral surfaces are slightly darker, secondary
+text and micro labels are darker and heavier, and visible controls use normal
+sentence/title casing instead of forcing all text to lowercase. The generated
+shorts results now use one card per row at the normal desktop breakpoint, with
+more room for the preview, metadata, and edit actions. This changes presentation
+only; clipping selection, subtitle rendering behavior, editing endpoints, and
+the rest of the application flow are unchanged.
 
 ## Repository and branch setup
 
