@@ -235,6 +235,72 @@ def test_asgi_guard_snapshots_target_before_success_is_released(monkeypatch):
     assert events == ["snapshot:job-1:0", "body"]
 
 
+def test_asgi_guard_serializes_journal_commits_across_clips(monkeypatch):
+    import asyncio
+    import threading
+
+    first_snapshot_entered = threading.Event()
+    release_first_snapshot = threading.Event()
+    counters = {"active": 0, "max_active": 0, "calls": []}
+    counters_lock = threading.Lock()
+
+    async def inner(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b"ok", "more_body": False})
+
+    def fake_snapshot(_core, job_id, clip_index):
+        with counters_lock:
+            counters["active"] += 1
+            counters["max_active"] = max(counters["max_active"], counters["active"])
+            counters["calls"].append((job_id, clip_index))
+            is_first = len(counters["calls"]) == 1
+        if is_first:
+            first_snapshot_entered.set()
+            assert release_first_snapshot.wait(timeout=2)
+        with counters_lock:
+            counters["active"] -= 1
+        return True
+
+    monkeypatch.setattr(sg, "snapshot_clip", fake_snapshot)
+    guard = sg.ClipStateGuard(inner, SimpleNamespace())
+
+    async def request(clip_index):
+        used = False
+
+        async def receive():
+            nonlocal used
+            if used:
+                return {"type": "http.disconnect"}
+            used = True
+            body = json.dumps({"job_id": "job-1", "clip_index": clip_index}).encode()
+            return {"type": "http.request", "body": body, "more_body": False}
+
+        async def send(_message):
+            pass
+
+        await guard(
+            {"type": "http", "path": "/api/subtitle", "method": "POST"},
+            receive,
+            send,
+        )
+
+    async def run_requests():
+        first_wait = asyncio.to_thread(first_snapshot_entered.wait, 2)
+        await asyncio.gather(request(0), request(1), first_wait)
+
+    async def release_after_first_enters():
+        await asyncio.to_thread(first_snapshot_entered.wait, 2)
+        release_first_snapshot.set()
+
+    async def run_with_release():
+        await asyncio.gather(run_requests(), release_after_first_enters())
+
+    asyncio.run(run_with_release())
+    assert counters["calls"] == [("job-1", 0), ("job-1", 1)]
+    assert counters["max_active"] == 1
+
+
 def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
     import asyncio
 

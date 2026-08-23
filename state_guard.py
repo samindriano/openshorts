@@ -478,10 +478,17 @@ class ClipStateGuard:
         # remain independent, but two tabs cannot interleave writes to the same
         # current-file pointer and make one response commit the other edit.
         self._mutation_locks: Dict[Tuple[str, int], Any] = {}
+        # The journal is one shared file per job, so its read-modify-write
+        # commit must still be serialized across different clip mutations.
+        # This does not serialize rendering or endpoint work, only the small
+        # durable snapshot that follows a successful response.
+        self._journal_locks: Dict[str, Any] = {}
 
     async def _snapshot_clip(self, job_id: str, clip_index: int) -> bool:
-        return await self._asyncio.to_thread(
-            snapshot_clip, self.core, job_id, clip_index)
+        lock = self._journal_locks.setdefault(job_id, self._asyncio.Lock())
+        async with lock:
+            return await self._asyncio.to_thread(
+                snapshot_clip, self.core, job_id, clip_index)
 
     async def __call__(self, scope, receive, send):
         scope_type = scope.get("type")
