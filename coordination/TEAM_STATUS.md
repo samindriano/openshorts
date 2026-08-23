@@ -9,7 +9,7 @@ Only `MAIN` may edit this file.
 - **Control-plane source:** `samindriano/codex-orchestra` + adapted IDX Trade
   orchestration policy
 - **Active task:** `OPENS-ORCH-001`
-- **Task state:** `IN_PROGRESS_UNTIL_COMMITTED`
+- **Task state:** `ADOPTED`
 - **Execution policy:** `DIRECT/LIGHT/HEAVY` chosen from the ready execution
   frontier; no artificial parallelism
 - **Worker safety:** isolated worktrees/branches, disjoint file ownership,
@@ -18,8 +18,7 @@ Only `MAIN` may edit this file.
 - **Shared-file owner:** `MAIN`
 - **Commit policy:** MAIN creates validated local commits
 - **Push policy:** explicit user request required; no force-push by default
-- **Next milestone:** commit and verify the orchestration files, then use the
-  policy for future OpenShorts tasks
+- **Next milestone:** use the policy for the next non-trivial OpenShorts task
 
 ## Current task boundary
 

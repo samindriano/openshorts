@@ -8,7 +8,7 @@ reasoning_level: `direct`
 source_repository: `samindriano/openshorts`
 source_commit: `origin/main @ e0fa3fd591bbed235027a7b683fb3e19bdb0c683`
 branch: `improve/output-quality-v1`
-head_commit: `recorded by the commit containing this handoff`
+head_commit: `81bd89c`
 scope: `port reusable orchestra control-plane rules into OpenShorts`
 files_changed:
   - `AGENTS.md`
