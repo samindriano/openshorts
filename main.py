@@ -21,6 +21,7 @@ from google import genai
 from google.genai import types as genai_types
 
 import gemini_worker
+import gemini_rate_limiter
 import layout_picker
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
@@ -1267,46 +1268,42 @@ def transcribe_video(video_path):
 
     return transcript
 
-def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
+def _run_gemini_stage(client, model_name, prompt, schema,
+                      label="Gemini analysis"):
+    """One schema-enforced Gemini call with shared budgeting and retry.
     Returns (parsed_dict, cost_analysis)."""
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
     )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
-        except gemini_worker.GeminiBlockedError:
-            raise  # deterministic policy block — never retry
-        except Exception as e:
-            msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
-            if attempt == max_attempts or not transient:
-                raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
-            time.sleep(wait)
+    response_holder = {}
+
+    def _handle_response(response):
+        response_holder["response"] = response
+        # Policy blocks are deterministic — retrying only burns quota and
+        # time, and the user deserves the real reason instead of a generic
+        # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
+        gemini_worker.raise_if_blocked(response)
+        # Parsing stays inside the retry loop. Gemini has returned HTTP 200 with
+        # an empty body before; that should retry the current stage, not restart
+        # transcription or the already-completed scoring batches.
+        parsed_obj = getattr(response, "parsed", None)
+        if parsed_obj is not None:
+            return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+        return gemini_worker._parse_json_response_text(
+            gemini_worker._get_response_text(response))
+
+    parsed = gemini_rate_limiter.call_with_retry(
+        lambda: client.models.generate_content(
+            model=model_name, contents=prompt, config=config),
+        label=label,
+        estimated_tokens=gemini_rate_limiter.estimate_tokens(prompt),
+        handle_response=_handle_response,
+        non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+        sleep=time.sleep,
+    )
+    response = response_holder.get("response")
+    return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
 
 
 def get_viral_clips(transcript_result, video_duration):
@@ -1355,7 +1352,9 @@ def get_viral_clips(transcript_result, video_duration):
             prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
                 video_duration=video_duration, language=language,
                 windows_json=json.dumps(payload, ensure_ascii=False))
-            parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
+            parsed, cost = _run_gemini_stage(
+                client, model_name, prompt, gemini_worker.ScoreResponse,
+                label=f"transcript scoring batch {b // SCORE_BATCH + 1}")
             if cost:
                 costs.append(cost)
             scored.extend(parsed.get("windows") or [])
@@ -1378,7 +1377,9 @@ def get_viral_clips(transcript_result, video_duration):
             min_clips=min_clips, max_clips=max_clips,
             min_secs=min_secs, max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
+        detail, cost = _run_gemini_stage(
+            client, model_name, prompt, gemini_worker.DetailResponse,
+            label="transcript detail selection")
         if cost:
             costs.append(cost)
 
@@ -1466,10 +1467,27 @@ def get_visual_clips(video_path, video_duration, language="en"):
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
         )
-        response = client.models.generate_content(
-            model=model_name, contents=[file_upload, prompt], config=config)
-        gemini_worker.raise_if_blocked(response)
-        parsed = json.loads(response.text)
+        response_holder = {}
+
+        def _handle_response(response):
+            response_holder["response"] = response
+            gemini_worker.raise_if_blocked(response)
+            parsed_obj = getattr(response, "parsed", None)
+            if parsed_obj is not None:
+                return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+            return gemini_worker._parse_json_response_text(
+                gemini_worker._get_response_text(response))
+
+        parsed = gemini_rate_limiter.call_with_retry(
+            lambda: client.models.generate_content(
+                model=model_name, contents=[file_upload, prompt], config=config),
+            label="visual clip selection",
+            estimated_tokens=gemini_rate_limiter.estimate_tokens(
+                prompt, extra_tokens=max(0, int(video_duration * 300))),
+            handle_response=_handle_response,
+            non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+            sleep=time.sleep,
+        )
         shorts = parsed.get("shorts") or []
         # Clamp to the real duration; drop anything degenerate.
         clean = []
@@ -1482,7 +1500,8 @@ def get_visual_clips(video_path, video_duration, language="en"):
             print("⚠️ Vision pass returned no usable clips.")
             return None
 
-        cost = gemini_worker._calculate_cost_analysis(response, model_name)
+        cost = gemini_worker._calculate_cost_analysis(
+            response_holder.get("response"), model_name)
         if cost:
             print(f"💰 Vision cost ({model_name}): ${cost.get('total_cost', 0):.6f}")
         result = {"shorts": clean}

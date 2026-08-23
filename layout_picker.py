@@ -41,7 +41,6 @@ whole-video mode already has, at 2.2s per clip instead of ~15s.
 Off by default (``AUTO_LAYOUT=1``). A caller that already switched layouts on
 by hand wins: this only ever ADDS, so an explicit choice is never overridden.
 """
-import json
 import os
 
 # AUTO_LAYOUT=1 decides and applies. AUTO_LAYOUT=shadow decides, logs, and
@@ -148,6 +147,7 @@ def pick(video_path, video_duration):
         from google import genai
         from google.genai import types as genai_types
         import gemini_worker
+        import gemini_rate_limiter
 
         frames = sample_frames(video_path)
         if not frames:
@@ -157,15 +157,33 @@ def pick(video_path, video_duration):
         client = genai.Client(api_key=api_key)
         parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
                  for b in frames]
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.LayoutChoice,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        answer = json.loads(response.text) or {}
+        config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=gemini_worker.LayoutChoice,
+        )
+
+        def _handle_response(response):
+            gemini_worker.raise_if_blocked(response)
+            parsed = getattr(response, "parsed", None)
+            if parsed is not None:
+                return parsed.model_dump() if hasattr(parsed, "model_dump") else parsed
+            return gemini_worker._parse_json_response_text(
+                gemini_worker._get_response_text(response))
+
+        answer = gemini_rate_limiter.call_with_retry(
+            lambda: client.models.generate_content(
+                model=model_name,
+                contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
+                config=config,
+            ),
+            label="layout selection",
+            estimated_tokens=gemini_rate_limiter.estimate_tokens(
+                gemini_worker.LAYOUT_CHOICE_PROMPT,
+                extra_tokens=len(frames) * 300,
+            ),
+            handle_response=_handle_response,
+            non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+        )
     except Exception as e:
         print(f"   ⚠️ Layout choice failed ({e}) — keeping the default layout.")
         return "none"
