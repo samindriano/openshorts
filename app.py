@@ -16,6 +16,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from typing import Any, Dict, Optional, List
 from contextlib import asynccontextmanager
+from urllib.parse import quote
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Request, Header, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -1949,6 +1950,179 @@ async def get_status(job_id: str, request: Request):
         "status": job['status'],
         "logs": _visible_logs(job['logs']),
         "result": job.get('result')
+    }
+
+
+def _local_job_uploads(job_id: str) -> list[str]:
+    """Return upload files owned by a local job, without following user paths."""
+    prefix = f"{job_id}_"
+    paths = []
+    try:
+        names = os.listdir(UPLOAD_DIR)
+    except OSError:
+        return paths
+    for name in names:
+        if not name.startswith(prefix):
+            continue
+        path = _safe_under(UPLOAD_DIR, name)
+        if path and os.path.isfile(path):
+            paths.append(path)
+    return paths
+
+
+def _local_job_video_items(job_id: str, job_path: str, metadata: dict) -> list[dict]:
+    """Build browser-safe entries for the current files of one local job."""
+    meta_path = next(iter(glob.glob(os.path.join(job_path, "*_metadata.json"))), None)
+    if not meta_path:
+        return []
+    base_name = os.path.basename(meta_path).replace("_metadata.json", "")
+    items = []
+    for index, clip in enumerate(metadata.get("shorts", []) or []):
+        stored_url = clip.get("video_url")
+        filename = os.path.basename((stored_url or "").split("?", 1)[0])
+        if not filename or not _clip_url_points_to_file(job_path, stored_url):
+            filename = _canonical_clip_file(job_path, base_name, index)
+        path = _safe_under(job_path, filename)
+        if not path or not os.path.isfile(path) or os.path.getsize(path) <= 0:
+            continue
+        stat = os.stat(path)
+        cache_version = stat.st_mtime_ns
+        video_url = f"/videos/{quote(job_id)}/{quote(filename)}?v={cache_version}"
+        title = (
+            clip.get("video_title_for_youtube_short")
+            or clip.get("title")
+            or base_name
+        )
+        items.append({
+            "id": f"{job_id}:{index}",
+            "job_id": job_id,
+            "clip_index": index,
+            "title": title,
+            "filename": filename,
+            "view_url": video_url,
+            "download_url": video_url,
+            "size_bytes": stat.st_size,
+        })
+    return items
+
+
+@app.get("/api/local/history")
+async def local_history():
+    """List generated self-hosted jobs that still have playable clips.
+
+    This is deliberately separate from the cloud /api/history route. It reads
+    only local metadata and never exposes source paths, environment values, or
+    cloud storage records.
+    """
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    videos = []
+    project_items = []
+    def _entry_mtime(name):
+        try:
+            return os.path.getmtime(os.path.join(OUTPUT_DIR, name))
+        except OSError:
+            return 0
+
+    try:
+        entries = sorted(os.listdir(OUTPUT_DIR), key=_entry_mtime, reverse=True)
+    except OSError:
+        entries = []
+
+    for job_id in entries:
+        try:
+            uuid.UUID(job_id)
+        except (ValueError, AttributeError):
+            continue
+        job_path = _safe_under(OUTPUT_DIR, job_id)
+        if not job_path or not os.path.isdir(job_path):
+            continue
+        meta_files = glob.glob(os.path.join(job_path, "*_metadata.json"))
+        if not meta_files:
+            continue
+        try:
+            with open(meta_files[0], "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            clips = _local_job_video_items(job_id, job_path, metadata)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            print(f"⚠️ Could not list local job {job_id}: {exc}")
+            continue
+        if not clips:
+            continue
+        created_at = datetime.fromtimestamp(
+            os.path.getmtime(job_path), tz=timezone.utc).isoformat()
+        project_title = clips[0]["title"]
+        project_bytes = sum(item["size_bytes"] for item in clips)
+        videos.extend({**item, "created_at": created_at} for item in clips)
+        project_items.append({
+            "job_id": job_id,
+            "title": project_title,
+            "created_at": created_at,
+            "clip_count": len(clips),
+            "size_bytes": project_bytes,
+        })
+
+    return {"videos": videos, "projects": project_items}
+
+
+@app.delete("/api/local/history/{job_id}")
+async def delete_local_history(job_id: str, request: Request):
+    """Delete one completed local job's output and its owned upload.
+
+    A job directory is the deletion boundary. The endpoint rejects malformed
+    IDs, active jobs, symlink/path escapes, and cloud mode. The original source
+    is removed only when it is the upload named with this exact job UUID or is
+    already inside the job's output directory.
+    """
+    try:
+        uuid.UUID(job_id)
+    except (ValueError, AttributeError):
+        raise HTTPException(status_code=400, detail="Invalid job id")
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Not found")
+
+    job = jobs.get(job_id)
+    if job and job.get("status") not in ("completed", "failed"):
+        raise HTTPException(status_code=409, detail="This job is still running")
+
+    job_path = _safe_under(OUTPUT_DIR, job_id)
+    if not job_path or not os.path.isdir(job_path):
+        raise HTTPException(status_code=404, detail="Local job not found")
+    if os.path.isfile(os.path.join(job_path, _RESUME_FILE)) and not glob.glob(
+        os.path.join(job_path, "*_metadata.json")
+    ):
+        raise HTTPException(status_code=409, detail="This job is still resumable")
+
+    upload_paths = _local_job_uploads(job_id)
+    output_bytes = _dir_size(job_path)
+    output_files = sum(len(files) for _root, _dirs, files in os.walk(job_path))
+    upload_bytes = sum(os.path.getsize(path) for path in upload_paths)
+
+    try:
+        shutil.rmtree(job_path)
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Could not delete local job: {exc}")
+
+    deleted_uploads = 0
+    for path in upload_paths:
+        try:
+            os.remove(path)
+            deleted_uploads += 1
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            print(f"⚠️ Could not delete owned upload {os.path.basename(path)}: {exc}")
+
+    jobs.pop(job_id, None)
+    return {
+        "success": True,
+        "job_id": job_id,
+        "deleted_files": output_files + deleted_uploads,
+        "deleted_bytes": output_bytes + upload_bytes,
+        "deleted_output_bytes": output_bytes,
+        "deleted_upload_bytes": upload_bytes,
+        "source_upload_deleted": bool(deleted_uploads),
     }
 
 

@@ -1,29 +1,48 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { Loader2, Download, Film, FolderOpen } from 'lucide-react';
+import { Loader2, Download, Film, FolderOpen, Trash2 } from 'lucide-react';
 import { apiJson } from '../lib/api';
 
-// The signed-in user's saved video library (stored in R2). Private, signed links.
-// Videos are grouped by project (job); re-openable projects get a "reopen"
-// action that restores the whole job for further editing in the Clip Generator.
-export default function HistoryTab({ onReopenProject }) {
+// The library works in both modes: private signed links in cloud mode, and
+// local /videos links plus cleanup controls in self-host mode. Videos are
+// grouped by project (job); re-openable cloud projects can be restored for
+// further editing in the Clip Generator.
+export default function HistoryTab({ onReopenProject, onLocalDelete, localMode = false }) {
   const [videos, setVideos] = useState(null);
   const [projects, setProjects] = useState({});
   const [reopening, setReopening] = useState(null);
+  const [deleting, setDeleting] = useState(null);
   const [reopenError, setReopenError] = useState('');
+  const [deleteError, setDeleteError] = useState('');
+  const [deleteNotice, setDeleteNotice] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
-    apiJson('/api/history')
-      .then((d) => setVideos(d.videos || []))
-      .catch(() => setError('Could not load your library.'));
-    apiJson('/api/projects')
-      .then((d) => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const data = await apiJson(localMode ? '/api/local/history' : '/api/history');
+        if (cancelled) return;
+        setVideos(data.videos || []);
         const map = {};
-        for (const p of d.projects || []) map[p.job_id] = p;
+        for (const p of data.projects || []) map[p.job_id] = p;
         setProjects(map);
-      })
-      .catch(() => {});
-  }, []);
+        if (!localMode) {
+          apiJson('/api/projects')
+            .then((d) => {
+              if (cancelled) return;
+              const cloudMap = {};
+              for (const p of d.projects || []) cloudMap[p.job_id] = p;
+              setProjects(cloudMap);
+            })
+            .catch(() => {});
+        }
+      } catch (_) {
+        if (!cancelled) setError(localMode ? 'Could not load local clips.' : 'Could not load your library.');
+      }
+    };
+    load();
+    return () => { cancelled = true; };
+  }, [localMode]);
 
   // Group videos by job, preserving the newest-first order of /api/history.
   const groups = useMemo(() => {
@@ -48,6 +67,33 @@ export default function HistoryTab({ onReopenProject }) {
     }
   };
 
+  const handleDelete = async (jobId, title) => {
+    if (!localMode || deleting) return;
+    const confirmed = window.confirm(
+      `Delete all local files for “${title || 'this project'}”? This removes the generated clips and the source upload owned by this job.`
+    );
+    if (!confirmed) return;
+    setDeleting(jobId);
+    setDeleteError('');
+    setDeleteNotice('');
+    try {
+      const result = await apiJson(`/api/local/history/${jobId}`, { method: 'DELETE' });
+      setVideos((current) => (current || []).filter((video) => video.job_id !== jobId));
+      setProjects((current) => {
+        const next = { ...current };
+        delete next[jobId];
+        return next;
+      });
+      onLocalDelete?.(jobId);
+      const megabytes = ((result.deleted_bytes || 0) / 1024 / 1024).toFixed(1);
+      setDeleteNotice(`Deleted ${jobId}. Freed ${megabytes} MB.`);
+    } catch (e) {
+      setDeleteError(e?.detail || 'Could not delete this local project.');
+    } finally {
+      setDeleting(null);
+    }
+  };
+
   const fmtDate = (iso) => (iso ? new Date(iso).toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' }) : '');
 
   if (videos === null && !error) {
@@ -56,19 +102,23 @@ export default function HistoryTab({ onReopenProject }) {
 
   return (
     <div className="h-full overflow-y-auto p-8 max-w-5xl mx-auto animate-fade">
-      <p className="eyebrow mb-1.5">06 · HISTORY</p>
-      <h1 className="font-display lowercase text-2xl text-ink mb-2">Your library</h1>
-      <p className="text-muted text-sm mb-8 lowercase">
-        All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips.
+      <p className="eyebrow mb-1.5">06 · {localMode ? 'LOCAL LIBRARY' : 'HISTORY'}</p>
+      <h1 className="font-display text-2xl text-ink mb-2">{localMode ? 'Local Library' : 'Your Library'}</h1>
+      <p className="text-muted text-sm mb-8">
+        {localMode
+          ? 'Generated clips stored on this machine. Delete a project to remove its output files and owned source upload from disk.'
+          : "All the shorts you've generated, saved while your plan is active. Kept for 7 days after your plan ends. Reopen a project to keep editing its clips."}
       </p>
 
       {error && <p className="text-danger text-sm">{error}</p>}
       {reopenError && <p className="text-danger text-sm mb-4">{reopenError}</p>}
+      {deleteError && <p className="text-danger text-sm mb-4">{deleteError}</p>}
+      {deleteNotice && <p className="text-ok text-sm mb-4">{deleteNotice}</p>}
 
       {videos && videos.length === 0 && (
         <div className="text-center py-20 text-muted">
           <Film size={40} className="mx-auto mb-4 text-muted" />
-          <p className="lowercase">No videos yet. Generate your first short from the Clip Generator.</p>
+          <p>No videos yet. Generate your first short from the Clip Generator.</p>
         </div>
       )}
 
@@ -96,6 +146,18 @@ export default function HistoryTab({ onReopenProject }) {
                     {reopening === jobId
                       ? <><Loader2 size={14} className="animate-spin" /> reopening…</>
                       : <><FolderOpen size={14} /> reopen project</>}
+                  </button>
+                )}
+                {localMode && (
+                  <button
+                    onClick={() => handleDelete(jobId, project?.title || vids[0]?.title)}
+                    disabled={!!deleting}
+                    className="btn-danger px-3 py-2 text-xs shrink-0"
+                    title="Delete this job's generated files and owned source upload"
+                  >
+                    {deleting === jobId
+                      ? <><Loader2 size={14} className="animate-spin" /> deleting…</>
+                      : <><Trash2 size={14} /> Delete Files</>}
                   </button>
                 )}
               </div>
