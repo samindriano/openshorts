@@ -234,34 +234,61 @@ def _write_journal(job_dir: str, clips: list) -> None:
     )
 
 
-def snapshot_job(core: Any, job_id: str) -> bool:
-    """Persist the in-memory current clip state to the crash-safe sidecar.
+def _journal_rows(job_dir: str) -> Dict[int, dict]:
+    journal = _safe_json_load(_journal_path(job_dir)) or {}
+    rows = journal.get("clips") if journal.get("version") == STATE_VERSION else None
+    out: Dict[int, dict] = {}
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, dict) and isinstance(row.get("index"), int):
+                out[row["index"]] = row
+    return out
 
-    app.py remains the owner of metadata writes while requests are live. Writing
-    metadata again here could race a second edit that is already in progress.
-    The sidecar is the commit record: recovery can repair metadata from it after
-    a restart if app.py died between its own writes.
+
+def snapshot_clip(core: Any, job_id: str, clip_index: int) -> bool:
+    """Commit exactly one successful clip mutation to the crash-safe sidecar.
+
+    The journal is intentionally sparse until the next startup repair. A save
+    for clip A must never accidentally commit clip B's in-progress in-memory
+    state. Existing committed rows are preserved and only the response target
+    is replaced.
     """
     job = getattr(core, "jobs", {}).get(job_id)
     if not isinstance(job, dict) or job.get("status") != "completed":
         return False
-    job_dir = job.get("output_dir") or os.path.join(core.OUTPUT_DIR, job_id)
     mem_clips = ((job.get("result") or {}).get("clips") or [])
-    if not isinstance(mem_clips, list) or not mem_clips:
+    if (not isinstance(mem_clips, list) or clip_index < 0
+            or clip_index >= len(mem_clips) or not isinstance(mem_clips[clip_index], dict)):
         return False
-    _write_journal(job_dir, mem_clips)
+
+    job_dir = job.get("output_dir") or os.path.join(core.OUTPUT_DIR, job_id)
+    rows = _journal_rows(job_dir)
+    row = {"index": clip_index}
+    for field in _MUTABLE_FIELDS:
+        if field in mem_clips[clip_index]:
+            row[field] = copy.deepcopy(mem_clips[clip_index][field])
+    rows[clip_index] = row
+    _atomic_json_write(
+        _journal_path(job_dir),
+        {
+            "version": STATE_VERSION,
+            "saved_at_ns": time.time_ns(),
+            "clips": [rows[i] for i in sorted(rows)],
+        },
+    )
     return True
 
 
-def snapshot_all(core: Any) -> int:
-    count = 0
-    for job_id in list(getattr(core, "jobs", {}).keys()):
-        try:
-            if snapshot_job(core, job_id):
-                count += 1
-        except Exception as exc:
-            print(f"⚠️ [state-guard] snapshot failed for {job_id}: {exc}")
-    return count
+def snapshot_job(core: Any, job_id: str) -> bool:
+    """Compatibility/test helper: commit every clip of one completed job."""
+    job = getattr(core, "jobs", {}).get(job_id)
+    mem_clips = ((job or {}).get("result") or {}).get("clips") or []
+    if not isinstance(mem_clips, list) or not mem_clips:
+        return False
+    ok = False
+    for clip_index in range(len(mem_clips)):
+        ok = snapshot_clip(core, job_id, clip_index) or ok
+    return ok
 
 
 def repair_job(core: Any, job_id: str) -> bool:
@@ -402,17 +429,22 @@ async def _buffer_request_body(receive):
     return bytes(body), replay
 
 
-def _job_id_from_json(body: bytes) -> Optional[str]:
+def _edit_target_from_json(body: bytes) -> Tuple[Optional[str], Optional[int]]:
     if not body:
-        return None
+        return None, None
     try:
         payload = json.loads(body.decode("utf-8"))
     except (UnicodeDecodeError, ValueError, TypeError):
-        return None
+        return None, None
     if not isinstance(payload, dict):
-        return None
+        return None, None
     job_id = payload.get("job_id")
-    return str(job_id) if job_id else None
+    clip_index = payload.get("clip_index")
+    try:
+        clip_index = int(clip_index)
+    except (TypeError, ValueError):
+        clip_index = None
+    return (str(job_id) if job_id else None), clip_index
 
 
 class ClipStateGuard:
@@ -429,12 +461,14 @@ class ClipStateGuard:
         self.inner = inner
         self.core = core_module
         self._asyncio = asyncio
-        self._snapshot_locks: Dict[str, Any] = {}
+        # Serialize the whole mutation transaction per clip. Different clips
+        # remain independent, but two tabs cannot interleave writes to the same
+        # current-file pointer and make one response commit the other edit.
+        self._mutation_locks: Dict[Tuple[str, int], Any] = {}
 
-    async def _snapshot_job(self, job_id: str) -> bool:
-        lock = self._snapshot_locks.setdefault(job_id, self._asyncio.Lock())
-        async with lock:
-            return await self._asyncio.to_thread(snapshot_job, self.core, job_id)
+    async def _snapshot_clip(self, job_id: str, clip_index: int) -> bool:
+        return await self._asyncio.to_thread(
+            snapshot_clip, self.core, job_id, clip_index)
 
     async def __call__(self, scope, receive, send):
         scope_type = scope.get("type")
@@ -455,44 +489,50 @@ class ClipStateGuard:
             return await self.inner(scope, receive, send)
 
         body, replay_receive = await _buffer_request_body(receive)
-        job_id = _job_id_from_json(body)
-        captured = []
+        job_id, clip_index = _edit_target_from_json(body)
+        target = ((job_id, clip_index)
+                  if job_id is not None and clip_index is not None else None)
+        lock = (self._mutation_locks.setdefault(target, self._asyncio.Lock())
+                if target is not None else self._asyncio.Lock())
 
-        async def capture_send(message):
-            captured.append(message)
+        async with lock:
+            captured = []
 
-        await self.inner(scope, replay_receive, capture_send)
+            async def capture_send(message):
+                captured.append(message)
 
-        status_code = next(
-            (int(m.get("status", 500)) for m in captured
-             if m.get("type") == "http.response.start"),
-            500,
-        )
+            await self.inner(scope, replay_receive, capture_send)
 
-        if status_code < 400:
-            persisted = False
-            if job_id:
-                try:
-                    persisted = await self._snapshot_job(job_id)
-                except Exception as exc:
-                    print(f"⚠️ [state-guard] commit failed for {job_id}: {exc}")
-            if not persisted:
-                # Do not acknowledge a save whose current-file pointer was not
-                # durably committed. The rendered MP4 is left intact; retrying is
-                # safe, but a false success would recreate the restart bug.
-                payload = json.dumps({
-                    "detail": "Edit rendered but durable state commit failed. Retry the edit before restarting the backend."
-                }).encode("utf-8")
-                await send({
-                    "type": "http.response.start",
-                    "status": 500,
-                    "headers": [
-                        (b"content-type", b"application/json"),
-                        (b"content-length", str(len(payload)).encode("ascii")),
-                    ],
-                })
-                await send({"type": "http.response.body", "body": payload, "more_body": False})
-                return
+            status_code = next(
+                (int(m.get("status", 500)) for m in captured
+                 if m.get("type") == "http.response.start"),
+                500,
+            )
 
-        for message in captured:
-            await send(message)
+            if status_code < 400:
+                persisted = False
+                if target is not None:
+                    try:
+                        persisted = await self._snapshot_clip(job_id, clip_index)
+                    except Exception as exc:
+                        print(f"⚠️ [state-guard] commit failed for {job_id}/{clip_index}: {exc}")
+                if not persisted:
+                    # Do not acknowledge a save whose current-file pointer was not
+                    # durably committed. The rendered MP4 is left intact; retrying is
+                    # safe, but a false success would recreate the restart bug.
+                    payload = json.dumps({
+                        "detail": "Edit rendered but durable state commit failed. Retry the edit before restarting the backend."
+                    }).encode("utf-8")
+                    await send({
+                        "type": "http.response.start",
+                        "status": 500,
+                        "headers": [
+                            (b"content-type", b"application/json"),
+                            (b"content-length", str(len(payload)).encode("ascii")),
+                        ],
+                    })
+                    await send({"type": "http.response.body", "body": payload, "more_body": False})
+                    return
+
+            for message in captured:
+                await send(message)
