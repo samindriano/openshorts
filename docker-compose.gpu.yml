@@ -1,7 +1,8 @@
 # Optional local GPU acceleration overlay.
 #
-# Keeps docker-compose.yml unchanged so the existing CPU/self-host path remains
-# the default and rollback is just starting Compose without this file.
+# The base docker-compose.yml remains the compatibility/default stack. This
+# overlay changes only the backend build/runtime acceleration settings; the
+# restart-safe app entrypoint still comes from the base Compose file.
 #
 # Usage:
 #   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build backend
