@@ -121,6 +121,7 @@ def test_snapshot_commits_memory_to_journal_without_racing_metadata(tmp_path):
         "video_url": f"/videos/{job_id}/{new}",
         "render_revision": "1790000000000000000",
         "subtitle_config": {"captions": [{"text": "baru", "startMs": 0, "endMs": 500}]},
+        "crop_overrides": {"0": 0.42},
     })
 
     assert sg.snapshot_job(core, job_id)
@@ -129,6 +130,7 @@ def test_snapshot_commits_memory_to_journal_without_racing_metadata(tmp_path):
     assert meta["shorts"][0]["video_url"].endswith(clean)
     assert journal["clips"][0]["video_url"].endswith(new)
     assert journal["clips"][0]["subtitle_config"]["captions"][0]["text"] == "baru"
+    assert journal["clips"][0]["crop_overrides"] == {"0": 0.42}
 
 
 def test_unversioned_valid_derived_file_is_not_overridden(tmp_path):
@@ -149,6 +151,7 @@ def test_state_mutation_filter_is_narrow():
     assert sg.is_state_mutation("/api/subtitle", "POST")
     assert sg.is_state_mutation("/api/subtitle/remove", "POST")
     assert sg.is_state_mutation("/api/clip/rerender", "POST")
+    assert sg.is_state_mutation("/api/clip/reframe", "POST")
     assert not sg.is_state_mutation("/api/status/job", "GET")
     assert not sg.is_state_mutation("/api/subtitle", "GET")
 
