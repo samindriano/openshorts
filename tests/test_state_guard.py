@@ -161,6 +161,20 @@ def test_snapshot_clip_does_not_commit_other_inflight_clip(tmp_path):
     assert journal["clips"][0]["video_url"].endswith("video_clip_1.mp4")
 
 
+def test_long_number_in_finance_title_is_not_a_render_revision(tmp_path):
+    base = "cara_dapat_1000000000000"
+    clean = f"{base}_clip_1.mp4"
+    edited = f"edited_{clean}"
+    older_caption = f"subtitled_1790000000000000000_{clean}"
+    clip = {"video_url": f"/videos/job-1/{edited}"}
+    core, job_id, job_dir, _ = make_core(tmp_path, clip, base=base)
+    for name in (clean, edited, older_caption):
+        touch_nonempty(job_dir / name)
+
+    sg.repair_job(core, job_id)
+    assert core.jobs[job_id]["result"]["clips"][0]["video_url"].endswith(edited)
+
+
 def test_unversioned_valid_derived_file_is_not_overridden(tmp_path):
     base = "video"
     clean = f"{base}_clip_1.mp4"
