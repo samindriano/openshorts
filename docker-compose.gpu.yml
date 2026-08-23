@@ -1,0 +1,26 @@
+# Optional local GPU acceleration overlay.
+#
+# Keeps docker-compose.yml unchanged so the existing CPU/self-host path remains
+# the default and rollback is just starting Compose without this file.
+#
+# Usage:
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d --build backend
+#
+# Requires Docker Desktop/WSL2 NVIDIA GPU support on the host.
+services:
+  backend:
+    build:
+      context: .
+      args:
+        GPU: "1"
+    gpus: all
+    environment:
+      # Keep the existing Indonesian-friendly Whisper backend. Parakeet does
+      # not support Indonesian and would only add a failed pass before fallback.
+      - WHISPER_DEVICE=cuda
+      - WHISPER_COMPUTE=float16
+      - ASR_GPU_CONCURRENCY=1
+
+      # Probe NVENC once. If ffmpeg/NVIDIA cannot use it, ffmpeg_utils falls
+      # back to libx264 rather than changing pipeline semantics.
+      - FFMPEG_ENCODER=auto
