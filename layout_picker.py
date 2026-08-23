@@ -42,6 +42,10 @@ def apply(decision):
     }
     touched = []
     for name in _module_flags(decision):
+        if (name == "screencast_layout" and
+                normalize_provider(os.getenv("AI_PROVIDER") or "gemini") == "openai"):
+            print("   ⚠️ Screencast layout is Gemini-only; keeping the default layout.")
+            continue
         module = modules.get(name)
         if module is not None and not getattr(module, "ENABLED", False):
             module.ENABLED = True

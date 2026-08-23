@@ -9,7 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-from typing import Optional
+import time
+from typing import Callable, Optional
 
 from google import genai
 from google.genai import types as genai_types
@@ -22,7 +23,8 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
 
 
-def _run_gemini_stage(client, model_name, prompt, schema, label="Gemini analysis"):
+def _run_gemini_stage(client, model_name, prompt, schema, label="Gemini analysis",
+                      sleep: Optional[Callable[[float], None]] = None):
     """One Gemini stage using the shared cross-process rate limiter."""
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
@@ -47,6 +49,7 @@ def _run_gemini_stage(client, model_name, prompt, schema, label="Gemini analysis
         estimated_tokens=gemini_rate_limiter.estimate_tokens(prompt),
         handle_response=_handle_response,
         non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+        sleep=sleep or time.sleep,
     )
     response = response_holder.get("response")
     cost = gemini_worker._calculate_cost_analysis(response, model_name)

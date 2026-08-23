@@ -24,6 +24,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
+from ai_provider import normalize_provider, spec_for
 
 load_dotenv()
 
@@ -120,6 +121,22 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     return os.environ.get("GEMINI_API_KEY")
 
 
+async def resolve_ai_key(request: Request, provider: str) -> Optional[str]:
+    """Resolve only the selected provider's key for a clip-generation job.
+
+    Hosted mode remains Gemini-managed. Self-hosted mode accepts the selected
+    provider's header and falls back to that provider's environment variable;
+    the other provider is deliberately never consulted.
+    """
+    provider = normalize_provider(provider)
+    if provider == "gemini":
+        return await resolve_gemini(request)
+    if BILLING_ENABLED:
+        return None
+    spec = spec_for(provider)
+    return request.headers.get(spec.key_header) or os.environ.get(spec.key_env)
+
+
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
     """Resolve the Upload-Post key and the profile to post as.
 
@@ -176,6 +193,18 @@ def gemini_missing_error():
             "message": "This action needs an active plan. Choose a plan or add your own API key.",
         })
     return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+
+
+def ai_provider_missing_error(provider: str):
+    provider = normalize_provider(provider)
+    if provider == "gemini":
+        return gemini_missing_error()
+    if BILLING_ENABLED:
+        return HTTPException(
+            status_code=400,
+            detail="OpenAI provider is not available in hosted mode.",
+        )
+    return HTTPException(status_code=400, detail="Missing X-OpenAI-Key header")
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -555,7 +584,12 @@ def _recover_jobs_from_disk():
                 'logs': ["♻️ Job recovered from disk after server restart."],
                 'output_dir': job_path,
                 'user_id': owner,
-                'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
+                'result': {
+                    'clips': clips,
+                    'cost_analysis': data.get('cost_analysis'),
+                    'ai_provider': data.get('ai_provider'),
+                    'ai_model': data.get('ai_model'),
+                },
             }
             recovered += 1
         except Exception as e:
@@ -575,12 +609,14 @@ MAX_RESUME_ATTEMPTS = 2
 
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
-                           webhook_url=None, webhook_secret=None, base_url=None):
+                           webhook_url=None, webhook_secret=None, base_url=None,
+                           ai_provider="gemini"):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
             json.dump({
                 "cmd": cmd, "priority": priority,
+                "ai_provider": normalize_provider(ai_provider),
                 "user_id": None if user_id is None else str(user_id),
                 "reservation_id": reservation_id,
                 "watermark": bool(watermark), "attempts": 0,
@@ -654,13 +690,24 @@ def _resume_interrupted_jobs() -> set:
             continue
 
         # Rebuild env from scratch — the manifest holds no secrets. Managed
-        # (cloud) jobs get the server key; self-host falls back to its env key.
+        # (cloud) jobs get the server key; self-host falls back to the selected
+        # provider's env key. Never carry the unselected provider into a child.
         env = os.environ.copy()
+        try:
+            ai_provider = normalize_provider(m.get("ai_provider") or "gemini")
+        except ValueError:
+            ai_provider = "gemini"
+        for spec in (spec_for("gemini"), spec_for("openai")):
+            env.pop(spec.key_env, None)
+        selected_spec = spec_for(ai_provider)
         if BILLING_ENABLED and user_id is not None:
             try:
-                env["GEMINI_API_KEY"] = managed_keys.gemini_key()
+                env[selected_spec.key_env] = managed_keys.gemini_key()
             except Exception:
                 pass
+        elif os.environ.get(selected_spec.key_env):
+            env[selected_spec.key_env] = os.environ[selected_spec.key_env]
+        env["AI_PROVIDER"] = ai_provider
         if m.get("watermark"):
             env["WATERMARK"] = "1"
         else:
@@ -678,6 +725,7 @@ def _resume_interrupted_jobs() -> set:
             'logs': [f"♻️ Resuming your video after a server update (attempt {attempts})."],
             'cmd': m.get("cmd"),
             'env': env,
+            'ai_provider': ai_provider,
             'output_dir': job_path,
             'user_id': None if user_id is None else user_id,
             'reservation_id': reservation_id,
@@ -1271,10 +1319,12 @@ class ProcessRequest(BaseModel):
 # proxy URL that yt-dlp echoes in its verbose debug output) before the line is
 # ever printed to the server console or stored in the job log.
 _CREDENTIAL_URL_RE = re.compile(r'(\w+://)[^:/@\s]+:[^@/\s]+@')
+_API_KEY_RE = re.compile(r'(?i)\b(?:AIza[0-9A-Za-z_-]{20,}|sk-[0-9A-Za-z_-]{16,})\b')
 
 
 def _scrub_secrets(line: str) -> str:
-    return _CREDENTIAL_URL_RE.sub(r'\1***:***@', line)
+    scrubbed = _CREDENTIAL_URL_RE.sub(r'\1***:***@', line)
+    return _API_KEY_RE.sub('[REDACTED_API_KEY]', scrubbed)
 
 
 # Cloud users don't need (and shouldn't see) implementation details: the ingest
@@ -1391,7 +1441,12 @@ async def run_job(job_id, job_data):
                                  ready_clips.append(clip)
                         
                         if ready_clips:
-                             jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+                             jobs[job_id]['result'] = {
+                                 'clips': ready_clips,
+                                 'cost_analysis': cost_analysis,
+                                 'ai_provider': data.get('ai_provider'),
+                                 'ai_model': data.get('ai_model'),
+                             }
             except Exception as e:
                 # Ignore read errors during processing
                 pass
@@ -1428,7 +1483,12 @@ async def run_job(job_id, job_data):
                      clip_filename = _canonical_clip_file(output_dir, base_name, i)
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
                 
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+                jobs[job_id]['result'] = {
+                    'clips': clips,
+                    'cost_analysis': cost_analysis,
+                    'ai_provider': data.get('ai_provider'),
+                    'ai_model': data.get('ai_model'),
+                }
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -1518,7 +1578,7 @@ LAYOUT_IMPLIES = {
 }
 
 
-def layout_env(requested):
+def layout_env(requested, provider=None):
     """Env overrides for the layouts this job allows. Unknown names are ignored
     rather than rejected: a newer dashboard must not break an older API.
 
@@ -1527,6 +1587,8 @@ def layout_env(requested):
     "auto,punch_in" means "decide the layout yourself, and punch in regardless".
     """
     env = {}
+    selected_provider = normalize_provider(
+        provider or os.environ.get("AI_PROVIDER") or "gemini")
     for name in requested or []:
         key = str(name).strip().lower()
         if key == "auto":
@@ -1534,6 +1596,10 @@ def layout_env(requested):
             continue
         var = LAYOUT_ENV.get(key)
         if not var:
+            continue
+        if key == "screencast" and selected_provider == "openai":
+            # The screencast detector still uses Gemini video upload/vision.
+            # Do not enable it for an OpenAI-selected job.
             continue
         env[var] = "1"
         for extra in LAYOUT_IMPLIES.get(key, []):
@@ -1557,12 +1623,9 @@ async def process_endpoint(
     clip_max_seconds: Optional[str] = Form(None),
     auto_hook: Optional[str] = Form(None),
     auto_hook_style: Optional[str] = Form(None),
-    thumbnail_session_id: Optional[str] = Form(None)
+    thumbnail_session_id: Optional[str] = Form(None),
+    ai_provider: Optional[str] = Form(None),
 ):
-    api_key = await resolve_gemini(request)
-    if not api_key:
-        raise gemini_missing_error()
-
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
 
@@ -1583,6 +1646,17 @@ async def process_endpoint(
         auto_hook = body.get("auto_hook")
         auto_hook_style = body.get("auto_hook_style")
         thumbnail_session_id = body.get("thumbnail_session_id")
+        ai_provider = body.get("ai_provider")
+
+    try:
+        ai_provider = normalize_provider(ai_provider or "gemini")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if BILLING_ENABLED and ai_provider == "openai":
+        raise ai_provider_missing_error(ai_provider)
+    api_key = await resolve_ai_key(request, ai_provider)
+    if not api_key:
+        raise ai_provider_missing_error(ai_provider)
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -1672,12 +1746,18 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    # A child gets only the selected provider credential. This prevents an
+    # OpenAI job from accidentally falling through to Gemini in optional paths.
+    for spec in (spec_for("gemini"), spec_for("openai")):
+        env.pop(spec.key_env, None)
+    selected_spec = spec_for(ai_provider)
+    env["AI_PROVIDER"] = ai_provider
+    env[selected_spec.key_env] = api_key
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK
     # already takes.
-    chosen = layout_env(layouts)
+    chosen = layout_env(layouts, ai_provider)
     env.update(chosen)
     if chosen:
         print(f"[layouts] job={job_id} enabled={sorted(chosen)}")
@@ -1807,6 +1887,7 @@ async def process_endpoint(
         'logs': [f"Job {job_id} queued."],
         'cmd': cmd,
         'env': env,
+        'ai_provider': ai_provider,
         'output_dir': job_output_dir,
         'attestation': attestation,
         'user_id': user_id,
@@ -1832,7 +1913,7 @@ async def process_endpoint(
     _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id,
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
-                           base_url=api_base)
+                           base_url=api_base, ai_provider=ai_provider)
 
     _enqueue_job(job_id, priority)
 

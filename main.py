@@ -23,6 +23,8 @@ from google.genai import types as genai_types
 import gemini_worker
 import gemini_rate_limiter
 import layout_picker
+import clip_ai
+from ai_provider import normalize_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
@@ -1270,159 +1272,28 @@ def transcribe_video(video_path):
 
 def _run_gemini_stage(client, model_name, prompt, schema,
                       label="Gemini analysis"):
-    """One schema-enforced Gemini call with shared budgeting and retry.
-    Returns (parsed_dict, cost_analysis)."""
-    config = genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
-    response_holder = {}
-
-    def _handle_response(response):
-        response_holder["response"] = response
-        # Policy blocks are deterministic — retrying only burns quota and
-        # time, and the user deserves the real reason instead of a generic
-        # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-        gemini_worker.raise_if_blocked(response)
-        # Parsing stays inside the retry loop. Gemini has returned HTTP 200 with
-        # an empty body before; that should retry the current stage, not restart
-        # transcription or the already-completed scoring batches.
-        parsed_obj = getattr(response, "parsed", None)
-        if parsed_obj is not None:
-            return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-        return gemini_worker._parse_json_response_text(
-            gemini_worker._get_response_text(response))
-
-    parsed = gemini_rate_limiter.call_with_retry(
-        lambda: client.models.generate_content(
-            model=model_name, contents=prompt, config=config),
-        label=label,
-        estimated_tokens=gemini_rate_limiter.estimate_tokens(prompt),
-        handle_response=_handle_response,
-        non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
-        sleep=time.sleep,
-    )
-    response = response_holder.get("response")
-    return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
+    """Compatibility wrapper for existing Gemini retry tests and callers."""
+    return clip_ai._run_gemini_stage(
+        client, model_name, prompt, schema, label=label, sleep=time.sleep)
 
 
-def get_viral_clips(transcript_result, video_duration):
-    """Two-pass clip selection: score transcript windows, then detail the best.
-
-    Windowing gives even coverage on long videos (a single call over the whole
-    transcript clusters picks near the start), and the cheap scoring pass keeps
-    the expensive detail reasoning focused on the shortlist. Cuts are snapped to
-    word boundaries so clips don't start/end mid-word.
-    """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
-
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
-
-    # Full word list — ground truth for snapping cut points.
-    words = []
-    for segment in transcript_result['segments']:
-        for word in segment.get('words', []):
-            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
-
-    try:
-        # Scoring windows must be able to CONTAIN a max-length clip (the detail
-        # prompt keeps clips inside their candidate window), so scale them with
-        # the requested band — a user asking for 60-90s clips on the default
-        # 90s windows would get clips squeezed against the window walls.
-        min_secs, max_secs = clip_duration_bounds()
-        windows = build_transcript_windows(
-            transcript_result, video_duration,
-            window_seconds=max(90, int(max_secs * 1.5)))
-        print(f"   Built {len(windows)} scoring window(s).")
-        costs = []
-
-        # --- Pass 1: score windows in batches, keep the highest-scoring ---
-        scored = []
-        SCORE_BATCH = 8
-        for b in range(0, len(windows), SCORE_BATCH):
-            batch = windows[b:b + SCORE_BATCH]
-            payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in batch]
-            prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
-                windows_json=json.dumps(payload, ensure_ascii=False))
-            parsed, cost = _run_gemini_stage(
-                client, model_name, prompt, gemini_worker.ScoreResponse,
-                label=f"transcript scoring batch {b // SCORE_BATCH + 1}")
-            if cost:
-                costs.append(cost)
-            scored.extend(parsed.get("windows") or [])
-
-        # Shortlist the top windows; scale with duration so long videos surface
-        # more candidates without exploding the detail call.
-        scored.sort(key=lambda w: w.get("score", 0), reverse=True)
-        target = max(3, min(10, int(video_duration // 90) + 2))
-        by_id = {w["id"]: w for w in windows}
-        shortlist = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
-        if not shortlist:
-            shortlist = windows[:target]  # scoring returned nothing usable
-        print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
-
-        # --- Pass 2: detailed clip extraction on the shortlist ---
-        payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in shortlist]
-        min_clips, max_clips = clip_count_targets(len(shortlist))
-        prompt = gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            min_clips=min_clips, max_clips=max_clips,
-            min_secs=min_secs, max_secs=max_secs,
-            windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(
-            client, model_name, prompt, gemini_worker.DetailResponse,
-            label="transcript detail selection")
-        if cost:
-            costs.append(cost)
-
-        shorts = detail.get("shorts") or []
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
-        for s in shorts:
-            ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
-                                        min_duration=min_secs, max_duration=max_secs)
-            s["start"], s["end"] = ns, ne
-
-        # Aggregate cost across both passes.
-        cost_analysis = None
-        if costs:
-            cost_analysis = {
-                "input_tokens": sum(c.get("input_tokens", 0) for c in costs),
-                "output_tokens": sum(c.get("output_tokens", 0) for c in costs),
-                "total_cost": sum(c.get("total_cost", 0) for c in costs),
-                "model": model_name,
-            }
-            print(f"\U0001f4b0 Total cost ({model_name}, 2-pass, {len(costs)} calls): ${cost_analysis['total_cost']:.6f}")
-
-        if not shorts:
-            print("⚠️ 2-pass returned no clips.")
-            return None
-
-        result = {"shorts": shorts}
-        if cost_analysis:
-            result["cost_analysis"] = cost_analysis
-        return result
-    except gemini_worker.GeminiBlockedError as e:
-        # Content-policy rejection: propagate so the job fails with the real
-        # reason instead of a generic "no clips found".
-        print(f"🚫 {e}")
-        raise
-    except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
+def get_viral_clips(transcript_result, video_duration, provider=None):
+    """Delegate transcript selection to the provider-agnostic core."""
+    return clip_ai.get_viral_clips(
+        transcript_result, video_duration,
+        provider=provider or os.getenv("AI_PROVIDER") or "gemini")
 
 
-def get_visual_clips(video_path, video_duration, language="en"):
+def get_visual_clips(video_path, video_duration, language="en", provider=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
+    provider_name = normalize_provider(provider or os.getenv("AI_PROVIDER") or "gemini")
+    if provider_name == "openai":
+        raise RuntimeError(
+            "OpenAI provider currently requires a transcript for clip selection. "
+            "Choose Gemini for silent-video visual analysis."
+        )
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1584,6 +1455,8 @@ if __name__ == '__main__':
         print(f"❌ Input file not found: {input_video}")
         exit(1)
 
+    analysis_provider = normalize_provider(os.getenv("AI_PROVIDER") or "gemini")
+
     # Layout choice is per SOURCE video, not per clip: one upload and one call
     # instead of one per clip, and the answer is a property of the material
     # ("this is a screencast"), which does not change between its own clips.
@@ -1635,18 +1508,21 @@ if __name__ == '__main__':
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
 
-        # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
+        # 4. Selected-provider analysis (transcript-driven, or Gemini vision for
+        # silent videos; OpenAI explicitly fails rather than falling through).
         if transcript is not None:
-            clips_data = get_viral_clips(transcript, duration)
+            clips_data = get_viral_clips(
+                transcript, duration, provider=analysis_provider)
         else:
-            clips_data = get_visual_clips(input_video, duration)
+            clips_data = get_visual_clips(
+                input_video, duration, provider=analysis_provider)
 
         if not clips_data or 'shorts' not in clips_data:
             # Deliberately fail instead of reframing the whole video: that path
             # wrote no metadata.json, so app.py marked the job failed anyway
             # (app.py:1087) after burning GPU on a render nobody could see.
             raise RuntimeError(
-                "Clip detection failed — Gemini did not return usable clips for this video.")
+                f"Clip detection failed — {analysis_provider} did not return usable clips for this video.")
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 

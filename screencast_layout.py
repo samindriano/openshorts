@@ -26,14 +26,19 @@ What is different here is the question asked and what the answer is used for.
     speaker, which is a reasonable frame even when the trigger was wrong.
 
 Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY; without one it
-is a silent no-op, like every other optional Gemini path here.
+is a silent no-op, like every other optional Gemini path here. It is also
+disabled for OpenAI-selected jobs so an OpenAI run never makes a hidden Gemini
+vision request during rendering.
 """
 import os
 import time
 
 import numpy as np
 
-ENABLED = os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
+ENABLED = (
+    os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
+    and os.environ.get("AI_PROVIDER", "gemini").strip().lower() != "openai"
+)
 
 # Fraction of the frame width the content must span. A corner ticker, logo or
 # channel bug sits far below this; a screen recording, slide or spreadsheet sits
@@ -169,7 +174,8 @@ def detect_content_ranges(video_path, video_duration):
     Returns (start, end, what, width_fraction) tuples, or [] on any failure:
     a missing answer must degrade to today's routing rather than break the job.
     """
-    if not ENABLED:
+    if (not ENABLED or
+            os.environ.get("AI_PROVIDER", "gemini").strip().lower() == "openai"):
         return []
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
