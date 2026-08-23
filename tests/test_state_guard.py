@@ -133,6 +133,34 @@ def test_snapshot_commits_memory_to_journal_without_racing_metadata(tmp_path):
     assert journal["clips"][0]["crop_overrides"] == {"0": 0.42}
 
 
+def test_snapshot_clip_does_not_commit_other_inflight_clip(tmp_path):
+    job_id = "job-1"
+    job_dir = tmp_path / job_id
+    job_dir.mkdir()
+    write_json(job_dir / "video_metadata.json", {
+        "shorts": [
+            {"video_url": f"/videos/{job_id}/video_clip_1.mp4"},
+            {"video_url": f"/videos/{job_id}/video_clip_2.mp4"},
+        ]
+    })
+    core = SimpleNamespace(
+        OUTPUT_DIR=str(tmp_path),
+        jobs={job_id: {
+            "status": "completed",
+            "output_dir": str(job_dir),
+            "result": {"clips": [
+                {"video_url": f"/videos/{job_id}/subtitled_1790000000000000000_video_clip_1.mp4"},
+                {"video_url": f"/videos/{job_id}/subtitled_9990000000000000000_video_clip_2.mp4"},
+            ]},
+        }},
+    )
+
+    assert sg.snapshot_clip(core, job_id, 0)
+    journal = json.load(open(job_dir / sg.STATE_FILE, encoding="utf-8"))
+    assert [row["index"] for row in journal["clips"]] == [0]
+    assert journal["clips"][0]["video_url"].endswith("video_clip_1.mp4")
+
+
 def test_unversioned_valid_derived_file_is_not_overridden(tmp_path):
     base = "video"
     clean = f"{base}_clip_1.mp4"
@@ -164,14 +192,15 @@ def test_asgi_guard_snapshots_target_before_success_is_released(monkeypatch):
     async def inner(scope, receive, send):
         request = await receive()
         assert b'"job_id": "job-1"' in request.get("body", b"")
+        assert b'"clip_index": 0' in request.get("body", b"")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok", "more_body": False})
 
-    def fake_snapshot(_core, job_id):
-        events.append(f"snapshot:{job_id}")
+    def fake_snapshot(_core, job_id, clip_index):
+        events.append(f"snapshot:{job_id}:{clip_index}")
         return True
 
-    monkeypatch.setattr(sg, "snapshot_job", fake_snapshot)
+    monkeypatch.setattr(sg, "snapshot_clip", fake_snapshot)
     guard = sg.ClipStateGuard(inner, SimpleNamespace())
 
     async def send(message):
@@ -184,12 +213,12 @@ def test_asgi_guard_snapshots_target_before_success_is_released(monkeypatch):
         if sent_request:
             return {"type": "http.disconnect"}
         sent_request = True
-        return {"type": "http.request", "body": b'{"job_id": "job-1"}', "more_body": False}
+        return {"type": "http.request", "body": b'{"job_id": "job-1", "clip_index": 0}', "more_body": False}
 
     asyncio.run(guard(
         {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
     ))
-    assert events == ["snapshot:job-1", "body"]
+    assert events == ["snapshot:job-1:0", "body"]
 
 
 def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
@@ -202,7 +231,7 @@ def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
         await send({"type": "http.response.start", "status": 500, "headers": []})
         await send({"type": "http.response.body", "body": b"no", "more_body": False})
 
-    monkeypatch.setattr(sg, "snapshot_job", lambda core, job_id: calls.append(job_id) or True)
+    monkeypatch.setattr(sg, "snapshot_clip", lambda core, job_id, clip_index: calls.append((job_id, clip_index)) or True)
     guard = sg.ClipStateGuard(inner, SimpleNamespace())
 
     async def send(message):
@@ -214,7 +243,7 @@ def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
         if used:
             return {"type": "http.disconnect"}
         used = True
-        return {"type": "http.request", "body": b'{"job_id":"job-1"}', "more_body": False}
+        return {"type": "http.request", "body": b'{"job_id":"job-1","clip_index":0}', "more_body": False}
 
     asyncio.run(guard(
         {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
@@ -233,7 +262,7 @@ def test_asgi_guard_fails_closed_when_commit_cannot_be_persisted(monkeypatch):
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b'{"success":true}', "more_body": False})
 
-    monkeypatch.setattr(sg, "snapshot_job", lambda core, job_id: False)
+    monkeypatch.setattr(sg, "snapshot_clip", lambda core, job_id, clip_index: False)
     guard = sg.ClipStateGuard(inner, SimpleNamespace())
 
     async def send(message):
@@ -246,7 +275,7 @@ def test_asgi_guard_fails_closed_when_commit_cannot_be_persisted(monkeypatch):
         if used:
             return {"type": "http.disconnect"}
         used = True
-        return {"type": "http.request", "body": b'{"job_id":"job-1"}', "more_body": False}
+        return {"type": "http.request", "body": b'{"job_id":"job-1","clip_index":0}', "more_body": False}
 
     asyncio.run(guard(
         {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
