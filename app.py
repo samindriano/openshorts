@@ -1518,12 +1518,22 @@ async def health():
 
 @app.get("/api/config")
 async def get_config():
-    return {
+    config = {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
-        "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
+        "googleAuthEnabled": bool(BILLING_ENABLED and cloud and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
     }
+    # Self-host users may rely on provider keys mounted into the server
+    # environment. Expose availability only as booleans; never expose the key
+    # material itself. Hosted mode deliberately omits these fields so managed
+    # provider configuration cannot be inferred from this endpoint.
+    if not BILLING_ENABLED:
+        config.update({
+            "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        })
+    return config
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""

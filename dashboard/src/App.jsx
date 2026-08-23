@@ -26,6 +26,7 @@ import AIProviderModal from './components/AIProviderModal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
+import { getProviderAvailability } from './lib/providerAvailability';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -200,7 +201,17 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds } = useAuth();
+  const {
+    billingEnabled,
+    isManaged,
+    isSignedIn,
+    me,
+    plan,
+    refreshMe,
+    jobRetentionSeconds,
+    serverGeminiConfigured,
+    serverOpenaiConfigured,
+  } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   const [showPlanChoice, setShowPlanChoice] = useState(false);
@@ -837,7 +848,17 @@ function App() {
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
   // Clip generation needs one AI provider key. Upload-Post remains a separate
   // publishing credential and must not block analysis.
-  const keysMissing = !billingEnabled && !apiKey && !openaiApiKey;
+  const {
+    geminiConfigured,
+    openaiConfigured,
+    keysMissing,
+  } = getProviderAvailability({
+    billingEnabled,
+    browserGeminiKey: apiKey,
+    browserOpenaiKey: openaiApiKey,
+    serverGeminiConfigured,
+    serverOpenaiConfigured,
+  });
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -1180,7 +1201,7 @@ function App() {
               >
                 <AlertTriangle size={12} />
                 <span className="hidden sm:inline">
-                    {!apiKey && !openaiApiKey
+                    {!geminiConfigured && !openaiConfigured
                      ? 'AI provider keys missing'
                      : 'AI provider key missing'}
                 </span>
@@ -1198,7 +1219,7 @@ function App() {
               <div>
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
-                  {!apiKey && !openaiApiKey
+                  {!geminiConfigured && !openaiConfigured
                     ? 'Set a Gemini or OpenAI key to generate clips.'
                     : 'Set an AI provider key to generate clips.'}
                 </span>
@@ -1245,7 +1266,9 @@ function App() {
                   <h1 className="font-display text-2xl text-ink">Settings</h1>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted mt-1">
-                  <Shield size={12} className="text-ok shrink-0" /> Privacy: keys only live in your browser (sent to backend just to process)
+                  <Shield size={12} className="text-ok shrink-0" /> {serverGeminiConfigured || serverOpenaiConfigured
+                    ? 'Privacy: server provider keys stay on the server; browser overrides are sent only for that job'
+                    : 'Privacy: keys only live in your browser (sent to backend just to process)'}
                 </div>
               </div>
               {isManaged ? (
@@ -1294,7 +1317,11 @@ function App() {
               ) : (
                 <>
               <p className="eyebrow mb-4">AI PROVIDERS</p>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <KeyInput
+                onKeySet={setApiKey}
+                savedKey={apiKey}
+                serverConfigured={serverGeminiConfigured}
+              />
               <KeyInput
                 onKeySet={setOpenaiApiKey}
                 savedKey={openaiApiKey}
@@ -1302,6 +1329,7 @@ function App() {
                 placeholder="sk-..."
                 helpHref="https://platform.openai.com/api-keys"
                 helpText="Get your OpenAI API key here →"
+                serverConfigured={serverOpenaiConfigured}
               />
 
               <div className="card p-4 sm:p-6 mt-8">
@@ -1914,8 +1942,10 @@ function App() {
           setPendingProcess(null);
           setActiveTab('settings');
         }}
-        geminiConfigured={!!apiKey}
-        openaiConfigured={!!openaiApiKey}
+        geminiConfigured={geminiConfigured}
+        openaiConfigured={openaiConfigured}
+        geminiServerConfigured={serverGeminiConfigured}
+        openaiServerConfigured={serverOpenaiConfigured}
       />
 
       {/* Missing API Key Modal */}
@@ -1923,9 +1953,9 @@ function App() {
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!apiKey && !openaiApiKey
+        title={!geminiConfigured && !openaiConfigured
           ? 'AI Provider Key Required'
-          : !apiKey
+          : !geminiConfigured
             ? 'Gemini API Key Required'
             : 'OpenAI API Key Required'}
         footer={
@@ -1951,12 +1981,12 @@ function App() {
           </p>
 
           {/* Gemini block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          <div className={`rounded-input p-4 space-y-2 border ${!geminiConfigured ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
+              {geminiConfigured ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              Gemini API Key {geminiConfigured && <span className="text-ok">— {serverGeminiConfigured && !apiKey ? 'configured on server' : 'set'}</span>}
             </p>
-            {!apiKey && (
+            {!geminiConfigured && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
                   <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">aistudio.google.com/app/apikey</a></li>
@@ -1979,12 +2009,12 @@ function App() {
           </div>
 
           {/* OpenAI block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!openaiApiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          <div className={`rounded-input p-4 space-y-2 border ${!openaiConfigured ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {openaiApiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              OpenAI API Key {openaiApiKey && <span className="text-ok">— set</span>}
+              {openaiConfigured ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              OpenAI API Key {openaiConfigured && <span className="text-ok">— {serverOpenaiConfigured && !openaiApiKey ? 'configured on server' : 'set'}</span>}
             </p>
-            {!openaiApiKey && (
+            {!openaiConfigured && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
                   <li>Go to <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">platform.openai.com/api-keys</a></li>

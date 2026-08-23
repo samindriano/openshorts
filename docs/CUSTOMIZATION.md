@@ -1,13 +1,14 @@
-# OpenShorts fork baseline
+# OpenShorts fork integration notes
 
 Status date: 2026-08-23
 
 ## Purpose
 
-This fork is the vanilla OpenShorts baseline for a personal Indonesian
-finance/podcast clipping project. Custom clip-selection logic, prompts, UI
-redesign, n8n, TikTok auto-publishing, and affiliate functionality are out of
-scope until the baseline is tested manually.
+This fork is the working OpenShorts implementation for a personal Indonesian
+finance/podcast clipping project. The current integration combines selectable
+Gemini/OpenAI clip analysis, output-quality and durable editor changes, and the
+local light-neutral dashboard palette. Upstream behavior, provider boundaries,
+and publishing safeguards remain explicit rather than being silently changed.
 
 ## Dashboard palette update
 
@@ -47,8 +48,8 @@ arrow keys. The selected split is stored locally in the browser under
 - Upstream repository: `https://github.com/mutonby/openshorts.git`
 - Fork/origin: `https://github.com/samindriano/openshorts.git`
 - Local path: `D:\Projects\Clip\openshorts`
-- Baseline commit: `e0fa3fd591bbed235027a7b683fb3e19bdb0c683`
-- Baseline setup commit: `72ff6276b9fdac8192032f7dcbd293df8b6e45ab`
+- Integration starting commit: `4e5d450c15f7dfbb2f9815897f716dd25f4a3a3b`
+- Canonical orchestration policy: `00494d4d826d17ad92e5bc67ba8212eef5bcb3f8`
 - Working branch: `custom/tiktok-finance`
 - Upstream-compatible branch: `main`
 
@@ -82,27 +83,48 @@ The Compose file defines `backend` (`8000`), `frontend` (`5175`), and
 
 ## Credentials
 
-For the self-hosted Clip Generator baseline:
+For the self-hosted Clip Generator:
 
-- Required: `GEMINI_API_KEY`, stored in the local file
-  `D:\Projects\Clip\openshorts\.env`. The exact line is
-  `GEMINI_API_KEY=`. Fill the value locally before the first real clipping
-  run; never paste it into chat or commit `.env`.
+- Configure at least one analysis provider in the local file
+  `D:\Projects\Clip\openshorts\.env`: `GEMINI_API_KEY` and/or
+  `OPENAI_API_KEY`. The dashboard can also hold browser-local keys and sends
+  only the selected provider header for a job.
+- `GET /api/config` exposes only the boolean fields
+  `gemini_configured` and `openai_configured` in self-host mode. It never
+  returns key material; hosted mode omits those self-host fields.
 - Optional for clipping: no fal.ai, ElevenLabs, Upload-Post, or AWS key is
   required just to run the local dashboard, ingest/transcribe/reframe/render a
   clip, and review it locally.
 - Optional feature credentials:
   - `ELEVENLABS_API_KEY` for voice dubbing.
   - `UPLOAD_POST_API_KEY` for social posting; TikTok publishing is deliberately
-    not being configured in this baseline.
+    not being configured in this local setup.
   - `FAL_KEY` for the separate AI Shorts/UGC actor-generation feature, not the
     core Clip Generator.
   - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
     `AWS_S3_BUCKET`, and `AWS_S3_PUBLIC_BUCKET` for optional S3 backup/gallery.
 
-No API keys were supplied, created, or printed. The local `.env` was created
-from the documented example with optional cloud values left commented out and
-`GEMINI_API_KEY=` left empty. Git ignores this file.
+The exact local key values are runtime state and must never be pasted into
+chat, logs, test fixtures, documentation, or commits. Git ignores `.env`.
+
+## Operating rules for implementation work
+
+`AGENTS.md` at the repository root is the canonical working policy. In
+particular:
+
+- inspect branch, HEAD, status, and all worktrees before consequential work;
+- use isolated worktrees for parallel writers and let only the integration
+  owner merge or resolve conflicts;
+- never restart or tear down another worktree's Docker stack, and use unique
+  project names/ports for isolated runtime checks;
+- never print, stage, commit, or copy API-key values into tracked files;
+- treat provider selection as explicit: an OpenAI job must not silently call
+  Gemini, and Gemini limiter protection must survive provider refactors;
+- treat subtitles and titles as durable editable layers. A successful HTTP
+  response is not proof of a fix: verify the current player/download/generated
+  file or rendered frame;
+- final reports must identify the branch/SHA, tests actually run, runtime
+  evidence, limitations, and the integration/push result.
 
 ## Runtime artifacts and storage
 
@@ -156,7 +178,7 @@ build to `/models/yolov8n.pt` and set the backend environment variable
 `YOLO_MODEL_PATH=/models/yolov8n.pt`. The existing reframe code already honors
 that variable, so no clip-selection or reframe algorithm was changed.
 
-## Baseline verification
+## Historical baseline verification
 
 Passed before the Docker build:
 
@@ -194,7 +216,7 @@ The above records the pre-remediation state. It is superseded by the final
 runtime results below. No application code or tests were changed to work
 around the failure.
 
-## Final baseline results
+## Historical final baseline results
 
 - `docker compose build` passed for backend, frontend, and renderer.
 - `docker compose up -d` passed; backend, frontend, and renderer are all Up.
@@ -222,16 +244,44 @@ Remaining limitations and reported failures:
   option is incompatible with the repository's flat `eslint.config.js`. Direct
   `npx eslint .` also fails because ESLint 8.57.1 cannot resolve the config's
   `eslint/config` export. Tests and source were not changed to hide this.
-- `GEMINI_API_KEY` is not configured. Gemini SDK import/readiness is present,
-  but actual AI moment analysis and a full Clip Generator job were not run.
+- The historical baseline did not have a configured Gemini key, so actual AI
+  moment analysis and a full Clip Generator job were not run at that time.
 - No real source video was uploaded, so Whisper inference, scene detection,
   subtitle rendering, reframe/face tracking, and final clip output were not
   end-to-end exercised. The installed/importable components and model
   readiness were verified without starting a job.
 
-This is a reproducible vanilla runtime baseline for manual testing with the
-credential/model limitations above. No prompts, UI, n8n, TikTok, or affiliate
-functionality was changed.
+This section is retained as historical provenance for the pre-integration
+baseline. The current integration validation is recorded below.
+
+## Integration validation (2026-08-23)
+
+- The isolated branch `integration/2026-08-23` was built from
+  `custom/tiktok-finance` at `4e5d450` and merged the canonical policy,
+  hybrid provider, and output-quality branches in that order. The existing
+  light palette commits were already present on the starting branch.
+- An isolated Compose project built backend, frontend, and renderer and passed
+  `8001/health`, `3101/health`, and the dashboard entry at
+  `http://localhost:5176/index.html`. The standard `8000/5175/3100` stack was
+  left running and untouched.
+- `/api/config` was checked for no-key, Gemini-only, OpenAI-only, both-key, and
+  hosted-mode cases. Self-host returns only `gemini_configured` and
+  `openai_configured` booleans; hosted mode omits them and no key value appears
+  in the response.
+- The real self-host UI showed both provider choices as `Configured on server`
+  and Settings showed the same status without rendering key values.
+- A real multipart OpenAI job reached `gpt-5.6-luna` and the two-pass scoring /
+  detail path. It failed closed afterward because the bundled 41-second demo
+  has zero transcript segments and returned no usable clips; it did not fall
+  back to Gemini. Gemini selection, selected-key isolation, and limiter paths
+  are covered by the focused tests below.
+- Passed: dashboard production build; provider availability tests (4); video
+  source tests (3); Remotion TypeScript build; Python compile; and 189 focused
+  backend/provider/output-quality tests.
+- Known tooling limitation: the repository `npm run lint` script stops before
+  linting because its `--ext` flag is incompatible with the checked-in flat
+  ESLint configuration. The Vite dev server's root `/` 404 is also present on
+  the untouched baseline; `/index.html` is the working dev entry.
 
 ## Gemini rate-limit handling
 

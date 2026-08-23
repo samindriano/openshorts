@@ -24,6 +24,8 @@ export default function AIProviderModal({
   onOpenSettings,
   geminiConfigured = false,
   openaiConfigured = false,
+  geminiServerConfigured = false,
+  openaiServerConfigured = false,
 }) {
   const ready = { gemini: geminiConfigured, openai: openaiConfigured };
 
@@ -72,7 +74,12 @@ export default function AIProviderModal({
                   {provider.description}
                 </p>
                 <div className={`mt-3 text-xs ${configured ? 'text-ok' : 'text-warn'}`}>
-                  {configured ? 'API key ready' : 'API key not configured'}
+                  {configured
+                    ? (provider.id === 'gemini' && geminiServerConfigured)
+                      || (provider.id === 'openai' && openaiServerConfigured)
+                      ? 'Configured on server'
+                      : 'Browser API key ready'
+                    : 'API key not configured'}
                 </div>
               </button>
             );

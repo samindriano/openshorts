@@ -8,6 +8,7 @@ export default function KeyInput({
     placeholder = 'AIzaSy...',
     helpHref = 'https://aistudio.google.com/app/apikey',
     helpText = 'Get your free Gemini API Key here →',
+    serverConfigured = false,
 }) {
     const [key, setKey] = useState(savedKey || '');
     const [isVisible, setIsVisible] = useState(false);
@@ -33,6 +34,9 @@ export default function KeyInput({
                     <Key size={18} />
                 </div>
                 <h2 className="font-display lowercase text-lg text-ink">{title}</h2>
+                {serverConfigured && (
+                    <span className="badge-ok ml-auto">Server configured</span>
+                )}
             </div>
 
             <div className="flex flex-col sm:flex-row gap-3">
@@ -66,7 +70,9 @@ export default function KeyInput({
                 </button>
             </div>
             <p className="mt-3 text-xs text-muted">
-                Your key is stored locally in your browser for convenience.
+                {serverConfigured
+                    ? 'A server-side key is available. Add a browser key only if you want to override it.'
+                    : 'Your key is stored locally in your browser for convenience.'}
                 {helpHref && (
                     <>
                         <br />

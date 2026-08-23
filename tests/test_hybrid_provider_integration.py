@@ -21,6 +21,14 @@ def _post_json(payload, headers=None):
     return asyncio.run(_do())
 
 
+def _get_config():
+    async def _do():
+        transport = httpx.ASGITransport(app=app_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            return await client.get("/api/config")
+    return asyncio.run(_do())
+
+
 @pytest.fixture()
 def process_dirs(tmp_path, monkeypatch):
     output = tmp_path / "output"
@@ -153,3 +161,48 @@ def test_selected_provider_env_fallback_and_secret_scrubbing(monkeypatch):
     scrubbed = app_module._scrub_secrets(f"provider error: {secret}")
     assert secret not in scrubbed
     assert "REDACTED_API_KEY" in scrubbed
+
+
+@pytest.mark.parametrize(
+    ("gemini", "openai"),
+    [(False, False), (True, False), (False, True), (True, True)],
+)
+def test_self_host_config_reports_provider_availability_without_key_material(
+        monkeypatch, gemini, openai):
+    monkeypatch.setattr(app_module, "BILLING_ENABLED", False)
+    gemini_secret = "gemini-config-secret-test"
+    openai_secret = "openai-config-secret-test"
+    if gemini:
+        monkeypatch.setenv("GEMINI_API_KEY", gemini_secret)
+    else:
+        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    if openai:
+        monkeypatch.setenv("OPENAI_API_KEY", openai_secret)
+    else:
+        monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    response = _get_config()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["gemini_configured"] is gemini
+    assert payload["openai_configured"] is openai
+    assert gemini_secret not in response.text
+    assert openai_secret not in response.text
+
+
+def test_hosted_config_does_not_expose_self_host_provider_flags(monkeypatch):
+    monkeypatch.setattr(app_module, "BILLING_ENABLED", True)
+    gemini_secret = "hosted-gemini-config-secret-test"
+    openai_secret = "hosted-openai-config-secret-test"
+    monkeypatch.setenv("GEMINI_API_KEY", gemini_secret)
+    monkeypatch.setenv("OPENAI_API_KEY", openai_secret)
+
+    response = _get_config()
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert "gemini_configured" not in payload
+    assert "openai_configured" not in payload
+    assert gemini_secret not in response.text
+    assert openai_secret not in response.text

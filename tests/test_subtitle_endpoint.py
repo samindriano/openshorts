@@ -156,7 +156,7 @@ def test_apply_twice_uses_clean_source_and_persists_edited_caption(job, fake_ren
     ]
     metadata = json.loads(job["meta_path"].read_text(encoding="utf-8"))
     assert metadata["shorts"][0]["video_url"] == second_data["new_video_url"]
-    assert metadata["shorts"][0]["render_revision"] == "222"
+    assert metadata["shorts"][0]["render_revision"] == second_data["revision"]
     assert metadata["shorts"][0]["subtitle_config"]["fontColor"] == "#00FF00"
     assert app_module.jobs[JOB_ID]["result"]["clips"][0]["video_url"] == second_data["new_video_url"]
 
