@@ -26,6 +26,7 @@ _MUTABLE_FIELDS = (
     "subtitle_config",
     "auto_hook",
     "recipe",
+    "crop_overrides",
     "start",
     "end",
 )
@@ -364,7 +365,7 @@ _MUTATION_PATHS = (
     "/api/hook",
     "/api/edit",
     "/api/clip/rerender",
-    "/api/reframe",
+    "/api/clip/reframe",
     "/api/translate",
 )
 
