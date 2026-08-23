@@ -272,3 +272,59 @@ authentication or invalid-key errors. The no-config default is two retries
 `GEMINI_MAX_RETRIES=5`. A retry stays inside the current analysis stage, so
 completed scoring batches, transcription, and source downloads are not
 repeated.
+
+## Output-quality polish (`improve/output-quality-v1`)
+
+This pass keeps the existing clip-selection and publishing boundaries intact
+and focuses on the delivered video and its editor controls.
+
+- Source downloads may select an available AVC video stream up to 1440p when
+  the paid-quality cap is not active. A 1080p source still has a hard detail
+  ceiling; the pipeline cannot recover detail that is absent upstream.
+- Vertical and general-layout scaling now uses Lanczos for delivery frames,
+  while the low-resolution tracking analysis uses area scaling to reduce
+  detector noise. The legacy OpenCV fallback also uses Lanczos.
+- TRACK camera motion keeps its safe zone but filters confirmed target
+  positions and eases toward a bounded speed. This removes the former abrupt
+  slow/fast step changes while retaining jump confirmation and edge clamping.
+  `TARGET_SMOOTHING`, `CAMERA_MAX_SPEED`, and `CAMERA_ACCELERATION` are
+  environment overrides for controlled tuning.
+- Auto captions are smaller and less dense by default (`36px`, up to 20
+  characters, up to 1.6 seconds), with the browser preview aligned to the same
+  lower, narrower treatment.
+- The classic hook is a restrained warm-accent title card with smaller serif
+  type, softer spacing, and a shadow that matches the Remotion preview and
+  server-rendered bitmap.
+- Hook saves always go through `/api/hook`, creating a durable derived file.
+  Replacing or removing a hook still walks back to the clean clip and reapplies
+  captions without stacking. The updated file and `auto_hook` metadata are
+  returned to the result card, so preview, download, and a reopened modal use
+  the same current version. Nanosecond filename IDs avoid same-second edit
+  collisions during rapid successive saves.
+- Subtitle “apply to this clip” now uses the same durable `/api/subtitle` path
+  for every style, including the non-karaoke styles that previously could stop
+  at a browser-only Remotion blob. “Apply to all” omits stale per-card
+  filenames, lets the backend resolve each clip's current canonical file, and
+  reports progress plus the first failed clip instead of silently swallowing
+  non-2xx responses.
+- The modal's `none`, `pop`, `word-highlight`, and `karaoke` animation choices
+  are now sent to the backend and mapped to the matching durable ASS renderer;
+  the server no longer falls back to a plain SRT burn after a styled preview.
+  ASS sizing is also scaled to the 1080x1920 preview coordinate system so
+  applied captions remain compact instead of rendering as oversized text.
+
+The clean clip remains beside every derived output. Hook entrance animation is
+still a browser-preview control; server-persisted hook output is static by
+design. Sources below 1080p, low-bitrate uploads, and aggressive vertical
+cropping remain genuine source-quality limitations rather than problems a
+filter can eliminate.
+
+Real-source validation for this pass used a 46.25-second talking-head segment
+from the repository's horizontal source, rendered to 1080x1920 with the same
+default v2 path before and after the changes. The baseline render was
+17,175,905 bytes at 2.837 Mbps; the updated render was 17,413,408 bytes at
+2.878 Mbps, with different SHA-256 hashes. Matched frames at 5s, 20s, and 35s
+showed the subject staying framed while the updated crop followed the motion
+with the new easing and delivery scaling. The vertical source sanity check was
+byte-identical by design because it already filled the delivery canvas and had
+no horizontal crop travel to exercise.

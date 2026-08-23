@@ -3,6 +3,7 @@ purge after the subscription grace period.
 """
 import asyncio
 import glob
+import json
 import os
 import re
 from datetime import timedelta
@@ -113,7 +114,7 @@ async def archive_job(user_id, job_id, clips, output_dir):
                 )).scalar_one_or_none()
                 state = {"v": 1, "clips": [
                     {"index": i, "original_file": filename, "server_file": filename,
-                     "active_layers": None}
+                     "active_layers": None, "subtitle_config": None}
                     for i, filename, _key, _title, _size in uploaded
                 ]}
                 total = sum(u[4] for u in uploaded)
@@ -157,8 +158,19 @@ async def archive_clip_edit(user_id, job_id, clip_index, output_dir, new_filenam
                 print(f"⚠️  R2 upload failed for hook intermediate of {job_id}: {e}")
 
     metadata_r2_key = None
+    subtitle_config_present = False
+    subtitle_config = None
     meta_files = glob.glob(os.path.join(output_dir, "*_metadata.json"))
     if meta_files:
+        try:
+            with open(meta_files[0], "r", encoding="utf-8") as f:
+                metadata = json.load(f)
+            shorts = metadata.get("shorts", [])
+            if clip_index < len(shorts) and "subtitle_config" in shorts[clip_index]:
+                subtitle_config_present = True
+                subtitle_config = shorts[clip_index].get("subtitle_config")
+        except Exception as e:
+            print(f"⚠️ Could not read subtitle recipe for {job_id}: {e}")
         metadata_r2_key = storage.job_key(user_id, job_id, os.path.basename(meta_files[0]))
         try:
             await asyncio.to_thread(storage.upload_file, meta_files[0], metadata_r2_key,
@@ -180,12 +192,14 @@ async def archive_clip_edit(user_id, job_id, clip_index, output_dir, new_filenam
                 entry = next((c for c in clips_state if c.get("index") == clip_index), None)
                 if entry is None:
                     entry = {"index": clip_index, "original_file": new_filename,
-                             "active_layers": None}
+                             "active_layers": None, "subtitle_config": None}
                     clips_state.append(entry)
                 prev = entry.get("server_file")
                 if prev and prev not in (entry.get("original_file"), new_filename):
                     superseded_key = storage.job_key(user_id, job_id, prev)
                 entry["server_file"] = new_filename
+                if subtitle_config_present:
+                    entry["subtitle_config"] = subtitle_config
                 state["clips"] = clips_state
                 proj.state = state
                 if metadata_r2_key:
@@ -230,7 +244,8 @@ async def list_projects(request: Request):
 async def save_project_state(job_id: str, request: Request):
     """Persist the browser-only edit state of a project's clips.
 
-    Body: {"clips": [{"index", "active_layers", "server_file"?}]}. The Remotion
+    Body: {"clips": [{"index", "active_layers", "server_file"?,
+    "subtitle_config"?}]}. The Remotion
     layers exist nowhere but the browser, so the frontend syncs them here
     (debounced) to survive reload / reopen."""
     user = await get_current_user_required(request)
@@ -255,12 +270,15 @@ async def save_project_state(job_id: str, request: Request):
                 entry = by_index.get(idx)
                 if entry is None:
                     entry = {"index": idx, "original_file": None,
-                             "server_file": None, "active_layers": None}
+                             "server_file": None, "active_layers": None,
+                             "subtitle_config": None}
                     clips_state.append(entry)
                     by_index[idx] = entry
                 entry["active_layers"] = c.get("active_layers")
                 if c.get("server_file"):
                     entry["server_file"] = os.path.basename(str(c["server_file"]))
+                if "subtitle_config" in c:
+                    entry["subtitle_config"] = c.get("subtitle_config")
             state["clips"] = clips_state
             proj.state = state
     return {"success": True}

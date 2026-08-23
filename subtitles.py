@@ -13,6 +13,12 @@ _STDIO_CONFIGURED = False
 # German than "base" without being much slower on CPU.
 DEFAULT_WHISPER_MODEL = "small"
 
+# The UI font size is expressed against the 1080x1920 Remotion preview, while
+# libass lays text out in its 288px PlayResY coordinate space. Without this
+# conversion a value of 20 becomes a visibly oversized ~17-unit ASS font;
+# 0.55 keeps the burned result close to the 40px Remotion preview.
+ASS_FONT_SCALE = 0.55
+
 
 def get_whisper_config():
     """Return the faster-whisper model config, overridable via env vars."""
@@ -216,6 +222,31 @@ def generate_srt(transcript, clip_start, clip_end, output_path, max_chars=20, ma
     return True
 
 
+def resolve_render_style(style="classic", animation="none", effect="none"):
+    """Resolve the modal's preview controls to the durable server renderer.
+
+    Remotion exposes ``animation`` as the user-facing control, while the
+    server renderer historically used ``style=karaoke`` plus an ``effect``.
+    Keeping this mapping in one place prevents a previewed glow/pop/karaoke
+    choice from silently falling back to a plain SRT burn on apply.
+    """
+    style = str(style or "classic").lower()
+    animation = str(animation or "none").lower()
+    effect = str(effect or "none").lower()
+    valid_effects = {"none", "glow", "pop", "box"}
+    if style == "karaoke":
+        return "karaoke", effect if effect in valid_effects else "none"
+
+    animation_effects = {
+        "pop": "pop",
+        "word-highlight": "glow",
+        "karaoke": "none",
+    }
+    if animation in animation_effects:
+        return "karaoke", animation_effects[animation]
+    return "classic", "none"
+
+
 # Vertical margin for burned captions, in PlayResY=288 units (so ~15% of the
 # frame height). The old hardcoded 25 (8.7%) put captions underneath TikTok's
 # and Reels' own bottom UI — the caption/username block and the music ticker —
@@ -235,16 +266,16 @@ AUTO_CAPTION_STYLE = {
     "style": "karaoke",
     "alignment": "bottom",
     "font_name": "Anton",
-    "font_size": 44,
+    "font_size": 36,
     "font_color": "#FFFFFF",
     "highlight_color": "#FFE500",
     "border_color": "#000000",
-    "border_width": 4,
+    "border_width": 3,
     "effect": "pop",
     "base_opacity": 1.0,
     "uppercase": True,
-    "max_chars": 16,
-    "max_duration": 1.4,
+    "max_chars": 20,
+    "max_duration": 1.6,
 }
 
 
@@ -317,10 +348,9 @@ def generate_ass(transcript, clip_start, clip_end, output_path,
     if not blocks:
         return False
 
-    # Match the SRT burn path: PlayResY 288 keeps font sizes consistent.
-    final_fontsize = int(_clamp_number(fontsize, 10, 200, 16) * 0.85)
-    if final_fontsize < 10:
-        final_fontsize = 10
+    # Match the SRT burn path: PlayResY 288 keeps font sizes consistent, and
+    # the UI value must be reduced before libass scales it to the video.
+    final_fontsize = max(10, int(_clamp_number(fontsize, 10, 200, 16) * ASS_FONT_SCALE))
 
     align_map = {'top': 8, 'middle': 5, 'bottom': 2}
     ass_alignment = align_map.get(str(alignment).lower(), 2)
@@ -482,11 +512,9 @@ def burn_subtitles(video_path, srt_path, output_path, alignment=2, fontsize=16,
     elif align_lower == 'bottom':
         ass_alignment = 2
 
-    # Font size scaling for ASS virtual resolution (PlayResY=288 default)
-    # For vertical 1080x1920 video, we need larger text for readability
-    final_fontsize = int(_clamp_number(fontsize, 10, 200, 16) * 0.85)
-    if final_fontsize < 10:
-        final_fontsize = 10
+    # Font size scaling for ASS virtual resolution (PlayResY=288 default).
+    # Keep the server burn aligned with the compact 1080x1920 preview.
+    final_fontsize = max(10, int(_clamp_number(fontsize, 10, 200, 16) * ASS_FONT_SCALE))
 
     safe_font_name = _sanitize_font_name(font_name)
     bg_opacity = _clamp_number(bg_opacity, 0.0, 1.0, 0.0)

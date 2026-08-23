@@ -309,7 +309,7 @@ function App() {
   };
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
-  const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
+  const [bulkSub, setBulkSub] = useState({ running: false, completed: false, current: 0, total: 0, errors: 0, error: null });
   const [downloadingAll, setDownloadingAll] = useState(false);
   // Pre-flight quality gate: { info: {max_height, min_height, cookies_invalid}, data }
   const [qualityGate, setQualityGate] = useState(null);
@@ -366,6 +366,7 @@ function App() {
       index: Number(i),
       active_layers: v.activeLayers,
       server_file: v.serverVideoFile,
+      subtitle_config: v.subtitleConfig,
     }));
     s.pending = {};
     apiFetch(`/api/projects/${s.jobId}/state`, {
@@ -427,13 +428,36 @@ function App() {
   // Single-card server edits update the card's local player immediately. Keep
   // the parent result/session in sync too, otherwise a refresh restores the
   // pre-edit video_url from localStorage even though metadata.json is current.
-  const handleClipVideoUpdated = (index, videoUrl) => {
+  const handleClipVideoUpdated = (index, videoUrl, patch = null) => {
     if (!videoUrl) return;
     setResults((prev) => {
       if (!prev?.clips?.[index]) return prev;
       const clips = prev.clips.slice();
-      clips[index] = { ...clips[index], video_url: videoUrl };
+      clips[index] = { ...clips[index], video_url: videoUrl, ...(patch || {}) };
       return { ...prev, clips };
+    });
+    // A server edit creates a new version immediately, while the background
+    // archive may still point at the previous object. Never let the old
+    // durable URL win the race after apply/remove.
+    setDurableClips((prev) => {
+      if (!(index in prev)) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
+    setProjectState((prev) => {
+      if (!prev?.clips) return prev;
+      const hasSubtitleConfig = Object.prototype.hasOwnProperty.call(patch || {}, 'subtitle_config');
+      return {
+        ...prev,
+        clips: prev.clips.map((c) => (c.index === index
+          ? {
+              ...c,
+              server_file: (patch?.server_file || videoUrl).split('/').pop(),
+              ...(hasSubtitleConfig ? { subtitle_config: patch.subtitle_config } : {}),
+            }
+          : c)),
+      };
     });
   };
 
@@ -494,11 +518,12 @@ function App() {
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
     const total = clips.length;
-    if (!total) return;
-    setBulkSub({ running: true, current: 0, total, errors: 0 });
+    if (!total) return { ok: false, error: 'No clips are available for bulk subtitles.' };
+    setBulkSub({ running: true, completed: false, current: 0, total, errors: 0, error: null });
     let errors = 0;
+    let firstError = null;
     for (let i = 0; i < total; i++) {
-      setBulkSub({ running: true, current: i + 1, total, errors });
+      setBulkSub({ running: true, completed: false, current: i + 1, total, errors, error: firstError });
       try {
         const res = await apiFetch('/api/subtitle', {
           method: 'POST',
@@ -515,25 +540,64 @@ function App() {
             bg_color: options.bgColor,
             bg_opacity: options.bgOpacity,
             style: options.style || 'classic',
+            animation: options.animation || 'none',
             highlight_color: options.highlightColor || '#FFD700',
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
             uppercase: options.uppercase || false,
-            // Chain from the clip's current server file (its video_url basename).
-            input_filename: (clips[i].video_url || '').split('/').pop(),
           }),
         });
-        if (!res.ok) errors++;
-      } catch {
+        if (!res.ok) {
+          errors++;
+          const detail = await res.text().catch(() => '');
+          firstError ||= `Clip ${i + 1}: ${detail || `server returned ${res.status}`}`;
+        } else {
+          const data = await res.json().catch(() => null);
+          if (!data?.new_video_url) {
+            errors++;
+            firstError ||= `Clip ${i + 1}: server returned no output file.`;
+          } else {
+            setDurableClips((prev) => {
+              if (!(i in prev)) return prev;
+              const next = { ...prev };
+              delete next[i];
+              return next;
+            });
+            setResults((prev) => {
+              if (!prev?.clips?.[i]) return prev;
+              const nextClips = prev.clips.slice();
+              nextClips[i] = {
+                ...nextClips[i],
+                video_url: data.new_video_url,
+                render_revision: data.revision || null,
+                subtitle_config: data.subtitle_config || null,
+              };
+              return { ...prev, clips: nextClips };
+            });
+          }
+        }
+      } catch (e) {
         errors++;
+        firstError ||= `Clip ${i + 1}: ${e.message || 'request failed'}`;
       }
     }
-    setBulkSub({ running: false, current: total, total, errors });
+    setBulkSub({
+      running: false,
+      completed: true,
+      current: total,
+      total,
+      errors,
+      error: firstError,
+    });
     // Refresh results so each ResultCard picks up its new subtitled video_url.
     try {
       const data = await pollJob(jobId);
       if (data.result) setResults(data.result);
-    } catch { /* keep current results */ }
+    } catch (e) {
+      firstError ||= `Could not refresh the clip list: ${e.message || 'status request failed'}`;
+      setBulkSub((prev) => ({ ...prev, error: firstError }));
+    }
+    return { ok: errors === 0 && !firstError, error: firstError };
   };
 
   const handleDownloadAll = async () => {

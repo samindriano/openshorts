@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
@@ -13,7 +13,7 @@ const ENTRANCE_OPTIONS = [
 
 // Must mirror hooks.py HOOK_STYLES.
 const HOOK_STYLES = [
-    { value: 'classic', label: 'Classic', box: 'rgba(255,255,255,0.94)', text: '#000' },
+    { value: 'classic', label: 'Classic', box: 'rgba(248,250,252,0.96)', text: '#0F172A' },
     { value: 'dark', label: 'Dark', box: 'rgba(18,18,20,0.92)', text: '#fff' },
     { value: 'yellow', label: 'Yellow', box: 'rgba(255,214,0,0.96)', text: '#000' },
     { value: 'red', label: 'Red', box: 'rgba(220,38,38,0.96)', text: '#fff' },
@@ -47,6 +47,13 @@ export default function HookModal({ isOpen, onClose, onGenerate, onRemove, isPro
     const [style, setStyle] = useState(prefs.style || 'classic');
     const [entranceAnimation, setEntranceAnimation] = useState(prefs.entranceAnimation || 'spring');
     const [displayDuration, setDisplayDuration] = useState(5);
+
+    // A card can be remounted after a server edit while this modal instance is
+    // still alive. Refresh the draft when it opens so editing an existing hook
+    // starts from the text actually burned into the current file.
+    useEffect(() => {
+        if (isOpen) setText(initialText || 'POV: You are using the viral hook feature');
+    }, [isOpen, initialText]);
 
     if (!isOpen) return null;
 
