@@ -9,12 +9,12 @@ from __future__ import annotations
 
 import json
 import os
-import time
 from typing import Optional
 
 from google import genai
 from google.genai import types as genai_types
 
+import gemini_rate_limiter
 import gemini_worker
 import openai_worker
 from ai_provider import normalize_provider, spec_for
@@ -22,45 +22,37 @@ from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
 
 
-def _run_gemini_stage(client, model_name, prompt, schema):
-    """Existing Gemini structured-output behavior, retained byte-for-byte in spirit."""
+def _run_gemini_stage(client, model_name, prompt, schema, label="Gemini analysis"):
+    """One Gemini stage using the shared cross-process rate limiter."""
     config = genai_types.GenerateContentConfig(
         response_mime_type="application/json",
         response_schema=schema,
     )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(
-                model=model_name, contents=prompt, config=config)
-            gemini_worker.raise_if_blocked(response)
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = (parsed_obj.model_dump()
-                          if hasattr(parsed_obj, "model_dump") else parsed_obj)
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            cost = gemini_worker._calculate_cost_analysis(response, model_name)
-            if cost:
-                cost = {**cost, "provider": "gemini"}
-            return parsed, cost
-        except gemini_worker.GeminiBlockedError:
-            raise
-        except Exception as exc:
-            msg = str(exc)
-            transient = any(tok in msg for tok in (
-                "503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED",
-                "500", "INTERNAL", "overloaded", "Deadline",
-                "empty response body", "did not contain a JSON object",
-                "Failed to parse Gemini JSON response",
-            ))
-            if attempt == max_attempts or not transient:
-                raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), "
-                  f"retrying in {wait}s: {msg[:150]}")
-            time.sleep(wait)
+    response_holder = {}
+
+    def _handle_response(response):
+        response_holder["response"] = response
+        gemini_worker.raise_if_blocked(response)
+        parsed_obj = getattr(response, "parsed", None)
+        if parsed_obj is not None:
+            return (parsed_obj.model_dump()
+                    if hasattr(parsed_obj, "model_dump") else parsed_obj)
+        return gemini_worker._parse_json_response_text(
+            gemini_worker._get_response_text(response))
+
+    parsed = gemini_rate_limiter.call_with_retry(
+        lambda: client.models.generate_content(
+            model=model_name, contents=prompt, config=config),
+        label=label,
+        estimated_tokens=gemini_rate_limiter.estimate_tokens(prompt),
+        handle_response=_handle_response,
+        non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+    )
+    response = response_holder.get("response")
+    cost = gemini_worker._calculate_cost_analysis(response, model_name)
+    if cost:
+        cost = {**cost, "provider": "gemini"}
+    return parsed, cost
 
 
 class _ProviderRunner:
@@ -76,9 +68,10 @@ class _ProviderRunner:
         if self.provider == "gemini":
             self.client = genai.Client(api_key=self.api_key)
 
-    def run(self, prompt, schema, mode):
+    def run(self, prompt, schema, label):
         if self.provider == "gemini":
-            return _run_gemini_stage(self.client, self.model_name, prompt, schema)
+            return _run_gemini_stage(
+                self.client, self.model_name, prompt, schema, label=label)
         return openai_worker.run_stage(
             self.api_key,
             self.model_name,
@@ -98,8 +91,7 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
     provider_name = normalize_provider(provider or os.getenv("AI_PROVIDER") or "gemini")
     runner = _ProviderRunner(provider_name)
     language = str(transcript_result.get("language") or "unknown")
-    print(f"🤖 Analyzing with {runner.spec.label} "
-          f"(2-pass: score → detail)...")
+    print(f"🤖 Analyzing with {runner.spec.label} (2-pass: score → detail)...")
     print(f"🤖 Model: {runner.model_name} | language: {language}")
 
     words = []
@@ -117,7 +109,6 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
         print(f"   Built {len(windows)} scoring window(s).")
         costs = []
 
-        # Pass 1: identical batching/coverage to the existing Gemini pipeline.
         scored = []
         score_batch = 8
         for start in range(0, len(windows), score_batch):
@@ -131,7 +122,11 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
                 language=language,
                 windows_json=json.dumps(payload, ensure_ascii=False),
             )
-            parsed, cost = runner.run(prompt, gemini_worker.ScoreResponse, "score")
+            parsed, cost = runner.run(
+                prompt,
+                gemini_worker.ScoreResponse,
+                f"transcript scoring batch {start // score_batch + 1}",
+            )
             if cost:
                 costs.append(cost)
             scored.extend(parsed.get("windows") or [])
@@ -147,7 +142,6 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
             shortlist = windows[:target]
         print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
 
-        # Pass 2: same detail prompt/schema for a fair provider comparison.
         payload = [
             {"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]}
             for w in shortlist
@@ -162,7 +156,8 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
             max_secs=max_secs,
             windows_json=json.dumps(payload, ensure_ascii=False),
         )
-        detail, cost = runner.run(prompt, gemini_worker.DetailResponse, "detail")
+        detail, cost = runner.run(
+            prompt, gemini_worker.DetailResponse, "transcript detail selection")
         if cost:
             costs.append(cost)
 
@@ -192,8 +187,11 @@ def get_viral_clips(transcript_result, video_duration, provider: Optional[str] =
             print(f"💰 Total estimated cost ({provider_name}/{runner.model_name}, "
                   f"{len(costs)} calls): ${cost_analysis['total_cost']:.6f}")
 
-        result = {"shorts": shorts, "ai_provider": provider_name,
-                  "ai_model": runner.model_name}
+        result = {
+            "shorts": shorts,
+            "ai_provider": provider_name,
+            "ai_model": runner.model_name,
+        }
         if cost_analysis:
             result["cost_analysis"] = cost_analysis
         return result
