@@ -35,7 +35,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -253,11 +253,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         try {
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
 
-            // Managed (paid) users get the Gemini key resolved server-side;
-            // only BYOK/self-host needs a local key.
-            if (!apiKey && !isManaged) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
-            }
+            // Managed users and self-hosted instances with GEMINI_API_KEY in
+            // the backend .env both resolve the key server-side. A browser key
+            // is still accepted when present, but must not be required here:
+            // otherwise self-host users are blocked before /api/edit can use
+            // their server-side configuration.
             const geminiHeaders = apiKey ? { 'X-Gemini-Key': apiKey } : {};
 
             // Try Remotion effects endpoint first
@@ -320,6 +320,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -352,6 +353,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 const serverUrl = getApiUrl(data.new_video_url);
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 const remaining = { ...activeLayers, subtitles: null };
                 setActiveLayers(remaining);
                 if (remaining.hook || remaining.effects) {
@@ -432,6 +434,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 const serverUrl = getApiUrl(data.new_video_url);
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 // Subtitles are burned into the server file now — drop the
                 // browser subtitle layer and re-compose any remaining browser
                 // layers (hook/effects) over the new file so they aren't lost.
@@ -506,6 +509,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
@@ -538,6 +542,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 setBurnedHook(null);
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
@@ -599,6 +604,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }

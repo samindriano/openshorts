@@ -355,6 +355,19 @@ function App() {
     s.timer = setTimeout(flushClipState, 2000);
   };
 
+  // Single-card server edits update the card's local player immediately. Keep
+  // the parent result/session in sync too, otherwise a refresh restores the
+  // pre-edit video_url from localStorage even though metadata.json is current.
+  const handleClipVideoUpdated = (index, videoUrl) => {
+    if (!videoUrl) return;
+    setResults((prev) => {
+      if (!prev?.clips?.[index]) return prev;
+      const clips = prev.clips.slice();
+      clips[index] = { ...clips[index], video_url: videoUrl };
+      return { ...prev, clips };
+    });
+  };
+
   // A recut replaced the clip's server file with a fresh render (burned layers
   // reset), so update the results, the reopened-project state and the synced
   // per-clip edit state, and let the ResultCard remount from the new file.
@@ -478,6 +491,7 @@ function App() {
 
   // Session Recovery: Restore on mount
   useEffect(() => {
+    let cancelled = false;
     try {
       const saved = localStorage.getItem(SESSION_KEY);
       if (!saved) return;
@@ -499,12 +513,23 @@ function App() {
         if (session.activeTab) setActiveTab(session.activeTab);
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
+        // The saved session can contain a URL for a derived file that was later
+        // replaced or removed. Reconcile completed sessions with the backend so
+        // a reload cannot restore a stale ResultCard source.
+        if (session.status !== 'processing' && session.jobId) {
+          apiJson(`/api/status/${session.jobId}`)
+            .then((data) => {
+              if (!cancelled && data?.result) setResults(data.result);
+            })
+            .catch(() => {});
+        }
         setSessionRecovered(true);
         setTimeout(() => setSessionRecovered(false), 5000);
       }
     } catch (e) {
       localStorage.removeItem(SESSION_KEY);
     }
+    return () => { cancelled = true; };
   }, []);
 
   // Session Recovery: Save state changes
@@ -1640,6 +1665,7 @@ function App() {
                           onReframeClip={(index) => setReframingClip(index)}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}
+                          onVideoUpdated={handleClipVideoUpdated}
                           durable={durableClips[i]}
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}

@@ -449,6 +449,15 @@ def _canonical_clip_file(output_dir, base_name, index):
     return os.path.basename(max(derived, key=os.path.getmtime))
 
 
+def _clip_url_points_to_file(output_dir, video_url):
+    """Return whether a stored clip URL still names a usable local file."""
+    if not video_url:
+        return False
+    filename = os.path.basename(video_url.split("?", 1)[0])
+    path = os.path.join(output_dir, filename)
+    return bool(filename) and os.path.isfile(path) and os.path.getsize(path) > 0
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -540,7 +549,7 @@ def _recover_jobs_from_disk():
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
             for i, clip in enumerate(clips):
-                if not clip.get('video_url'):
+                if not _clip_url_points_to_file(job_path, clip.get('video_url')):
                     clip['video_url'] = (
                         f"/videos/{job_id}/"
                         f"{_canonical_clip_file(job_path, base_name, i)}")
@@ -2036,7 +2045,7 @@ async def restore_project(job_id: str, request: Request):
         base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
         clips = data.get('shorts', [])
         for i, clip in enumerate(clips):
-            if not clip.get('video_url'):
+            if not _clip_url_points_to_file(job_dir, clip.get('video_url')):
                 clip['video_url'] = (
                     f"/videos/{job_id}/"
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
