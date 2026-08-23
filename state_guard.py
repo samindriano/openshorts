@@ -234,31 +234,20 @@ def _write_journal(job_dir: str, clips: list) -> None:
 
 
 def snapshot_job(core: Any, job_id: str) -> bool:
-    """Persist the in-memory current clip state to metadata + sidecar journal."""
+    """Persist the in-memory current clip state to the crash-safe sidecar.
+
+    app.py remains the owner of metadata writes while requests are live. Writing
+    metadata again here could race a second edit that is already in progress.
+    The sidecar is the commit record: recovery can repair metadata from it after
+    a restart if app.py died between its own writes.
+    """
     job = getattr(core, "jobs", {}).get(job_id)
     if not isinstance(job, dict) or job.get("status") != "completed":
         return False
     job_dir = job.get("output_dir") or os.path.join(core.OUTPUT_DIR, job_id)
-    meta_path = _metadata_path(job_dir)
-    if not meta_path:
-        return False
-    metadata = _safe_json_load(meta_path)
-    if not metadata:
-        return False
     mem_clips = ((job.get("result") or {}).get("clips") or [])
-    meta_clips = metadata.get("shorts") or []
-    if not isinstance(mem_clips, list) or not isinstance(meta_clips, list):
+    if not isinstance(mem_clips, list) or not mem_clips:
         return False
-
-    changed = False
-    for index, mem_clip in enumerate(mem_clips):
-        if index >= len(meta_clips) or not isinstance(mem_clip, dict) or not isinstance(meta_clips[index], dict):
-            continue
-        if _copy_mutable(mem_clip, meta_clips[index]):
-            changed = True
-    if changed:
-        metadata["shorts"] = meta_clips
-        _atomic_json_write(meta_path, metadata)
     _write_journal(job_dir, mem_clips)
     return True
 
@@ -377,7 +366,6 @@ _MUTATION_PATHS = (
     "/api/clip/rerender",
     "/api/reframe",
     "/api/translate",
-    "/api/render",
 )
 
 
@@ -387,13 +375,51 @@ def is_state_mutation(path: str, method: str) -> bool:
     return any(path == prefix or path.startswith(prefix + "/") for prefix in _MUTATION_PATHS)
 
 
+async def _buffer_request_body(receive):
+    """Read a small JSON edit body and return bytes + a replay receive callable."""
+    messages = []
+    body = bytearray()
+    while True:
+        message = await receive()
+        messages.append(message)
+        if message.get("type") != "http.request":
+            break
+        body.extend(message.get("body", b""))
+        if not message.get("more_body", False):
+            break
+
+    pos = 0
+
+    async def replay():
+        nonlocal pos
+        if pos < len(messages):
+            message = messages[pos]
+            pos += 1
+            return message
+        return {"type": "http.disconnect"}
+
+    return bytes(body), replay
+
+
+def _job_id_from_json(body: bytes) -> Optional[str]:
+    if not body:
+        return None
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, TypeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    job_id = payload.get("job_id")
+    return str(job_id) if job_id else None
+
+
 class ClipStateGuard:
     """Transparent ASGI wrapper around the existing FastAPI application.
 
-    - At startup completion, app.py has already recovered jobs; repair them
-      before Uvicorn exposes the socket as ready.
-    - After a successful clip mutation, snapshot metadata/journal before the
-      final response body is released, making a visible success crash-safe.
+    Successful edit responses are held for a few milliseconds until the exact
+    target job's state journal is fsynced. Therefore "the UI said saved" and
+    "the edit survives a backend restart" become the same transaction boundary.
     """
 
     def __init__(self, inner: Any, core_module: Any):
@@ -402,11 +428,12 @@ class ClipStateGuard:
         self.inner = inner
         self.core = core_module
         self._asyncio = asyncio
-        self._snapshot_lock = asyncio.Lock()
+        self._snapshot_locks: Dict[str, Any] = {}
 
-    async def _snapshot(self) -> None:
-        async with self._snapshot_lock:
-            await self._asyncio.to_thread(snapshot_all, self.core)
+    async def _snapshot_job(self, job_id: str) -> bool:
+        lock = self._snapshot_locks.setdefault(job_id, self._asyncio.Lock())
+        async with lock:
+            return await self._asyncio.to_thread(snapshot_job, self.core, job_id)
 
     async def __call__(self, scope, receive, send):
         scope_type = scope.get("type")
@@ -414,6 +441,8 @@ class ClipStateGuard:
         if scope_type == "lifespan":
             async def guarded_lifespan_send(message):
                 if message.get("type") == "lifespan.startup.complete":
+                    # app.py has already run _recover_jobs_from_disk at this
+                    # point. Repair before Uvicorn accepts the first request.
                     await self._asyncio.to_thread(repair_all, self.core)
                 await send(message)
 
@@ -424,21 +453,45 @@ class ClipStateGuard:
         ):
             return await self.inner(scope, receive, send)
 
-        status_code = 500
-        snapshot_done = False
+        body, replay_receive = await _buffer_request_body(receive)
+        job_id = _job_id_from_json(body)
+        captured = []
 
-        async def guarded_send(message):
-            nonlocal status_code, snapshot_done
-            if message.get("type") == "http.response.start":
-                status_code = int(message.get("status", 500))
-            if (
-                message.get("type") == "http.response.body"
-                and not message.get("more_body", False)
-                and status_code < 400
-                and not snapshot_done
-            ):
-                snapshot_done = True
-                await self._snapshot()
+        async def capture_send(message):
+            captured.append(message)
+
+        await self.inner(scope, replay_receive, capture_send)
+
+        status_code = next(
+            (int(m.get("status", 500)) for m in captured
+             if m.get("type") == "http.response.start"),
+            500,
+        )
+
+        if status_code < 400:
+            persisted = False
+            if job_id:
+                try:
+                    persisted = await self._snapshot_job(job_id)
+                except Exception as exc:
+                    print(f"⚠️ [state-guard] commit failed for {job_id}: {exc}")
+            if not persisted:
+                # Do not acknowledge a save whose current-file pointer was not
+                # durably committed. The rendered MP4 is left intact; retrying is
+                # safe, but a false success would recreate the restart bug.
+                payload = json.dumps({
+                    "detail": "Edit rendered but durable state commit failed. Retry the edit before restarting the backend."
+                }).encode("utf-8")
+                await send({
+                    "type": "http.response.start",
+                    "status": 500,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"content-length", str(len(payload)).encode("ascii")),
+                    ],
+                })
+                await send({"type": "http.response.body", "body": payload, "more_body": False})
+                return
+
+        for message in captured:
             await send(message)
-
-        return await self.inner(scope, receive, guarded_send)
