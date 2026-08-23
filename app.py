@@ -3273,7 +3273,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
     # Define outputs
-    generation_id = int(time.time())
+    generation_id = time.time_ns()
     is_karaoke = req.style == "karaoke"
     srt_filename = f"subs_{req.clip_index}_{generation_id}.{'ass' if is_karaoke else 'srt'}"
     srt_path = os.path.join(output_dir, srt_filename)
@@ -3511,7 +3511,7 @@ async def add_hook(req: HookRequest, request: Request):
         output_path = input_path
         reservation_id = None
     else:
-        output_filename = f"hooked_{int(time.time())}_{filename}"
+        output_filename = f"hooked_{time.time_ns()}_{filename}"
         output_path = os.path.join(output_dir, output_filename)
 
         # Map Size to Scale

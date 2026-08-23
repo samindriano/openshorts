@@ -92,6 +92,25 @@ face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detectio
 # damping can be dialled back without a deploy; 1 restores the old behaviour.
 JUMP_CONFIRM_FRAMES = max(int(os.environ.get("JUMP_CONFIRM_FRAMES", "3")), 1)
 
+# The detector is intentionally sampled every few frames. A confirmed target
+# is still the source of truth, but filtering it before the camera follows it
+# keeps one-pixel face-box changes from becoming visible micro-pans. The
+# values are conservative: the existing safe zone still prevents the camera
+# from chasing normal head movement, while the speed/acceleration limits keep
+# a real subject move in frame without snapping.
+try:
+    TARGET_SMOOTHING = min(max(float(os.environ.get("TARGET_SMOOTHING", "0.32")), 0.05), 1.0)
+except ValueError:
+    TARGET_SMOOTHING = 0.32
+try:
+    CAMERA_MAX_SPEED = min(max(float(os.environ.get("CAMERA_MAX_SPEED", "12.0")), 1.0), 30.0)
+except ValueError:
+    CAMERA_MAX_SPEED = 12.0
+try:
+    CAMERA_ACCELERATION = min(max(float(os.environ.get("CAMERA_ACCELERATION", "0.30")), 0.05), 1.0)
+except ValueError:
+    CAMERA_ACCELERATION = 0.30
+
 
 class SmoothedCameraman:
     """
@@ -110,6 +129,8 @@ class SmoothedCameraman:
         # Initial State
         self.current_center_x = video_width / 2
         self.target_center_x = video_width / 2
+        self.filtered_target_center_x = self.target_center_x
+        self._camera_step = 0.0
 
         # Calculate crop dimensions once
         self.crop_height = video_height
@@ -175,31 +196,39 @@ class SmoothedCameraman:
         """
         if force_snap:
             self.current_center_x = self.target_center_x
+            self.filtered_target_center_x = self.target_center_x
+            self._camera_step = 0.0
         else:
-            diff = self.target_center_x - self.current_center_x
-            
-            # SIMPLIFIED LOGIC:
-            # 1. Is the target outside the safe zone?
+            # Filter the confirmed target separately from target_center_x. The
+            # latter remains immediate so the existing jump confirmation and
+            # tracker hysteresis contracts do not change.
+            self.filtered_target_center_x += (
+                self.target_center_x - self.filtered_target_center_x
+            ) * TARGET_SMOOTHING
+            diff = self.filtered_target_center_x - self.current_center_x
+
+            # Keep the safe-zone deadband, then ease the camera step toward a
+            # bounded speed. This removes the old 3px/15px step change that
+            # made the crop visibly jerk whenever a detection crossed the
+            # threshold.
             if abs(diff) > self.safe_zone_radius:
-                # 2. If yes, move towards it slowly (Linear Speed)
-                # Determine direction
+                desired_step = min(CAMERA_MAX_SPEED,
+                                   max(1.0, abs(diff) * 0.16))
+            else:
+                desired_step = 0.0
+            self._camera_step += (
+                desired_step - self._camera_step
+            ) * CAMERA_ACCELERATION
+
+            if abs(diff) > self.safe_zone_radius and self._camera_step > 0:
                 direction = 1 if diff > 0 else -1
-                
-                # Speed: 2 pixels per frame (Slow pan)
-                # If the distance is HUGE (scene change or fast movement), speed up slightly
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0 # Fast re-frame
-                else:
-                    speed = 3.0  # Slow, steady pan
-                
-                self.current_center_x += direction * speed
-                
-                # Check if we overshot (prevent oscillation)
-                new_diff = self.target_center_x - self.current_center_x
+                step = min(abs(diff), self._camera_step)
+                self.current_center_x += direction * step
+
+                # Check if we overshot (prevent oscillation).
+                new_diff = self.filtered_target_center_x - self.current_center_x
                 if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
-                    self.current_center_x = self.target_center_x
-            
-            # If inside safe zone, DO NOTHING (Stationary Camera)
+                    self.current_center_x = self.filtered_target_center_x
                 
         # Clamp center
         half_crop = self.crop_width / 2
@@ -608,7 +637,7 @@ def plan_download_attempts(direct_first, statics, paid, have_hd):
     """Ordered (label, capped, proxy) download plan — pure, unit-tested.
 
     Cheapest bandwidth first: the server's own IP, then the flat-rate static
-    ISP proxies (uncapped 1080p, free bytes), then the per-GB paid proxy
+    ISP proxies (uncapped 1440p, free bytes), then the per-GB paid proxy
     (720p cost cap), and last the conservative fallback strategy through the
     paid proxy (or a static/direct when no paid proxy is configured).
     ``capped`` marks attempts whose bytes are billed per GB."""
@@ -707,9 +736,9 @@ def download_youtube_video(url, output_dir="."):
             return ('bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/'
                     'bestvideo[vcodec^=avc1][height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
-                'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
+        return ('bestvideo[vcodec^=avc1][height<=1440][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=avc1][height<=1440]+bestaudio/'
+                'best[height<=1440][ext=mp4]/best[ext=mp4]/best')
     fallback_fmt = 'best[ext=mp4]/best'
 
     def _base_opts(extractor_args, proxy):
@@ -875,7 +904,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
         style = _subs.AUTO_CAPTION_STYLE
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
-        generation_id = int(time.time())
+        generation_id = time.time_ns()
         # The output name MUST stay exactly "subtitled_<ts>_<clip filename>":
         # the modal's walk-back and _canonical_clip_file both reconstruct the
         # clean original from it, so trimming the stem here would orphan the
@@ -952,7 +981,7 @@ def auto_hook_clip(clip_path, clip):
             style = "classic"
         output_dir = os.path.dirname(clip_path)
         out_path = os.path.join(
-            output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
+            output_dir, f"hooked_{time.time_ns()}_{os.path.basename(clip_path)}")
         add_hook_to_video(clip_path, text, out_path, position="top",
                           duration=seconds, style=style)
         print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
@@ -1199,9 +1228,9 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
                 # Crop
                 if y2 > y1 and x2 > x1:
                     cropped = frame[y1:y2, x1:x2]
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
+                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
                 else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
+                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
 
             t_wr = time.time()
             encoder.stdin.write(output_frame.tobytes())

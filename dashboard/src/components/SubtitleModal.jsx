@@ -65,9 +65,9 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, error, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize] = useState(24);
+    const [fontSize] = useState(20);
     const [fontName, setFontName] = useState('Verdana');
     const [fontColor, setFontColor] = useState('#FFFFFF');
     const [highlightColor, setHighlightColor] = useState('#FFDD00');
@@ -160,7 +160,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         position,
         style: {
             fontFamily: fontName,
-            fontSize: fontSize * 2.2, // Scale up for 1080p (modal fontSize is for small preview)
+            fontSize: fontSize * 2.0, // Scale up for 1080p (modal fontSize is for small preview)
             fontColor,
             highlightColor,
             borderColor,
@@ -443,6 +443,16 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                     </div>
 
                     <div className="mt-5 shrink-0 space-y-2">
+                        {error && (
+                            <div className="px-3 py-2 rounded-input text-xs text-danger bg-[color-mix(in_oklab,var(--color-danger)_10%,transparent)]">
+                                {error}
+                            </div>
+                        )}
+                        {bulkProgress?.error && (
+                            <div className="px-3 py-2 rounded-input text-xs text-danger bg-[color-mix(in_oklab,var(--color-danger)_10%,transparent)]">
+                                {bulkProgress.error}
+                            </div>
+                        )}
                         {(() => {
                             // Text edits must survive the server render path too
                             // (issue #69): send the edited words whenever the text
@@ -481,7 +491,9 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                                         >
                                             {bulkRunning
                                                 ? <><Loader2 size={16} className="animate-spin" />applying to all… {bulkProgress.current}/{bulkProgress.total}</>
-                                                : `apply this style to all ${bulkCount} clips`}
+                                                : bulkProgress?.completed
+                                                    ? `applied to ${bulkProgress.total - (bulkProgress.errors || 0)}/${bulkProgress.total} clips`
+                                                    : `apply this style to all ${bulkCount} clips`}
                                         </button>
                                     )}
                                     {/* Clips ship captioned by default, so the way

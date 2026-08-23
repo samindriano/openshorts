@@ -202,6 +202,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // one). /api/hook REPLACES it; tracked locally so the modal stays honest
     // after edits without refetching the job.
     const [burnedHook, setBurnedHook] = useState(clip.auto_hook?.text || null);
+    const hookText = burnedHook || clip.auto_hook?.text || clip.viral_hook_text || null;
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -350,26 +351,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
-            if (data.new_video_url) {
-                const serverUrl = getApiUrl(data.new_video_url);
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
-                const remaining = { ...activeLayers, subtitles: null };
-                setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
-                    setCurrentVideoUrl(await renderInBrowser({
-                        videoUrl: serverUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
-                    }));
-                } else {
-                    setCurrentVideoUrl(serverUrl);
-                }
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
+            if (!data.new_video_url) throw new Error('Subtitle server returned no output file.');
+            const serverUrl = getApiUrl(data.new_video_url);
+            setServerVideoFile(data.new_video_url.split('/').pop());
+            onVideoUpdated?.(index, data.new_video_url);
+            const remaining = { ...activeLayers, subtitles: null };
+            setActiveLayers(remaining);
+            if (remaining.hook || remaining.effects) {
+                setCurrentVideoUrl(await renderInBrowser({
+                    videoUrl: serverUrl,
+                    durationInSeconds: clipDuration,
+                    subtitles: null,
+                    hook: remaining.hook,
+                    effects: remaining.effects,
+                }));
+            } else {
+                setCurrentVideoUrl(serverUrl);
             }
+            if (videoRef.current) videoRef.current.load();
+            setShowSubtitleModal(false);
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
@@ -382,27 +382,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsSubtitling(true);
         setEditError(null);
         try {
-            // Karaoke styles are burned server-side (ASS word-highlight render);
-            // the in-browser Remotion path only handles classic styles, and only
-            // when the server file has no burned-in content to preserve.
-            if (options.remotion && options.style !== 'karaoke' && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, subtitles: options.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
+            // Subtitle edits must be durable: the Remotion preview is useful
+            // while choosing a style, but a browser blob cannot be recovered by
+            // refresh and is not the server file used for download/publishing.
             const res = await apiFetch('/api/subtitle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -431,30 +413,31 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
-            if (data.new_video_url) {
-                const serverUrl = getApiUrl(data.new_video_url);
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
-                // Subtitles are burned into the server file now — drop the
-                // browser subtitle layer and re-compose any remaining browser
-                // layers (hook/effects) over the new file so they aren't lost.
-                const remaining = { ...activeLayers, subtitles: null };
-                setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
-                    const blobUrl = await renderInBrowser({
-                        videoUrl: serverUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
-                    });
-                    setCurrentVideoUrl(blobUrl);
-                } else {
-                    setCurrentVideoUrl(serverUrl);
-                }
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
+            if (!data.new_video_url) {
+                throw new Error('Subtitle server returned no output file.');
             }
+            const serverUrl = getApiUrl(data.new_video_url);
+            setServerVideoFile(data.new_video_url.split('/').pop());
+            onVideoUpdated?.(index, data.new_video_url);
+            // Subtitles are burned into the server file now — drop the
+            // browser subtitle layer and re-compose any remaining browser
+            // layers (hook/effects) over the new file so they aren't lost.
+            const remaining = { ...activeLayers, subtitles: null };
+            setActiveLayers(remaining);
+            if (remaining.hook || remaining.effects) {
+                const blobUrl = await renderInBrowser({
+                    videoUrl: serverUrl,
+                    durationInSeconds: clipDuration,
+                    subtitles: null,
+                    hook: remaining.hook,
+                    effects: remaining.effects,
+                });
+                setCurrentVideoUrl(blobUrl);
+            } else {
+                setCurrentVideoUrl(serverUrl);
+            }
+            if (videoRef.current) videoRef.current.load();
+            setShowSubtitleModal(false);
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
@@ -467,24 +450,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsHooking(true);
         setEditError(null);
         try {
-            if (hookData.remotion && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, hook: hookData.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
+            // Hook edits are intentionally server-backed. A browser-only
+            // Remotion blob cannot be recovered after refresh or downloaded as
+            // the job's current output, so every save gets a durable version.
             const payload = typeof hookData === 'string'
                 ? { text: hookData, position: 'top', size: 'M' }
                 : hookData;
@@ -499,7 +467,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     position: payload.position,
                     size: payload.size,
                     style: payload.style || 'classic',
-                    duration_seconds: payload.remotion?.displayDurationSec ?? null,
+                    duration_seconds: payload.remotion?.displayDurationSec ?? payload.duration_seconds ?? null,
                     input_filename: serverVideoFile
                 })
             });
@@ -507,10 +475,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                const serverUrl = getApiUrl(data.new_video_url);
                 setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
+                onVideoUpdated?.(index, data.new_video_url, { auto_hook: data.burned_hook || null });
                 setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
+                // Keep any existing browser-only subtitle/effect layers visible
+                // over the newly durable hook without burning the hook twice.
+                const remaining = { ...activeLayers, hook: null };
+                setActiveLayers(remaining);
+                if (remaining.subtitles || remaining.effects) {
+                    setCurrentVideoUrl(await renderInBrowser({
+                        videoUrl: serverUrl,
+                        durationInSeconds: clipDuration,
+                        subtitles: remaining.subtitles,
+                        hook: null,
+                        effects: remaining.effects,
+                    }));
+                } else {
+                    setCurrentVideoUrl(serverUrl);
+                }
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
             }
@@ -536,13 +519,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     remove: true,
                     input_filename: serverVideoFile,
                 }),
-            });
+                });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
+                onVideoUpdated?.(index, data.new_video_url, { auto_hook: null });
+                setActiveLayers({ ...activeLayers, hook: null });
                 setBurnedHook(null);
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
@@ -773,6 +757,21 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </div>
                 </div>
 
+                {hookText && (
+                    <div className="mb-3 bg-paper rounded-input px-3 py-2 border border-rule flex items-start gap-2 min-w-0">
+                        <span className="eyebrow shrink-0 pt-0.5">HOOK</span>
+                        <p className="text-xs text-ink2 line-clamp-2 flex-1 min-w-0" title={hookText}>
+                            {hookText}
+                        </p>
+                        <button
+                            onClick={() => setShowHookModal(true)}
+                            className="text-[11px] lowercase text-muted hover:text-brass transition-colors shrink-0"
+                        >
+                            edit
+                        </button>
+                    </div>
+                )}
+
                 {/* Descriptions (compact) — full text lives in the modal */}
                 <div className="flex-1 min-h-0 space-y-2 mb-4">
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0">
@@ -865,7 +864,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isHooking ? 'adding…' : 'viral hook'}
+                        {isHooking ? 'adding…' : (hookText ? 'edit hook' : 'viral hook')}
                     </button>
 
                     <button
@@ -1078,13 +1077,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}
                 onApplyAll={onBulkSubtitle ? async (options) => {
-                    await onBulkSubtitle(options);
-                    setShowSubtitleModal(false);
+                    const result = await onBulkSubtitle(options);
+                    if (result?.ok) setShowSubtitleModal(false);
                 } : undefined}
                 onRemove={handleRemoveSubtitles}
                 bulkCount={clipCount}
                 bulkProgress={bulkProgress}
                 isProcessing={isSubtitling || (bulkProgress?.running ?? false)}
+                error={editError}
                 videoUrl={originalVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
@@ -1097,11 +1097,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onGenerate={handleHook}
                 isProcessing={isHooking}
                 videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
+                initialText={hookText}
                 durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
                 existingSubtitles={activeLayers.subtitles}
                 hasCaptions={!!activeLayers.subtitles || /(^|_)subtitled_/.test(serverVideoFile || '')}
-                serverRender={hasServerBurns}
+                serverRender={true}
                 burnedHook={burnedHook}
                 onRemove={burnedHook ? handleRemoveHook : null}
             />

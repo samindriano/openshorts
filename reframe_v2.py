@@ -135,12 +135,12 @@ def general_filtergraph(out_w, out_h, content_h=None):
     fg_h += fg_h % 2
     return (
         f"[0:v]split=2[bga][fga];"
-        f"[bga]scale=-2:{out_h},crop=w=min(iw\\,{out_w}):h={out_h},"
-        f"scale={out_w}:{out_h},gblur=sigma=12[bg];"
+        f"[bga]scale=-2:{out_h}:flags=lanczos,crop=w=min(iw\\,{out_w}):h={out_h},"
+        f"scale={out_w}:{out_h}:flags=lanczos,gblur=sigma=12[bg];"
         # Scale by HEIGHT, then trim any overflow to the output width. crop
         # centres by default, and min() makes it a no-op when the scaled source
         # is already narrower than the frame (portrait/square sources).
-        f"[fga]scale=-2:{fg_h},crop=w=min(iw\\,{out_w}):h=ih[fg];"
+        f"[fga]scale=-2:{fg_h}:flags=lanczos,crop=w=min(iw\\,{out_w}):h=ih[fg];"
         f"[bg][fg]overlay=x=(W-w)/2:y=(H-h)/2,setsar=1[v]"
     )
 
@@ -247,7 +247,7 @@ def _analyze_trajectory(input_video, scenes_boundaries, scene_strategies,
 
     proc = subprocess.Popen(
         ["ffmpeg", "-loglevel", "error", "-i", input_video,
-         "-vf", f"scale={small_w}:{small_h}",
+         "-vf", f"scale={small_w}:{small_h}:flags=area",
          "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
         stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=frame_bytes * 4)
 
@@ -524,7 +524,7 @@ def render(input_video, final_output_video, aspect_ratio, content_ranges=None,
                 graph = (
                     f"[0:v]sendcmd=f='{cmd_path}',"
                     f"crop@c={init},"
-                    f"scale={out_w}:{out_h},setsar=1[v]"
+                    f"scale={out_w}:{out_h}:flags=lanczos,setsar=1[v]"
                 )
 
             _run([
