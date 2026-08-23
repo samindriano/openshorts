@@ -32,6 +32,11 @@ more room for the preview, metadata, and edit actions. This changes presentation
 only; clipping selection, subtitle rendering behavior, editing endpoints, and
 the rest of the application flow are unchanged.
 
+The palette was then softened again to avoid a flashbang-white canvas: surfaces
+now use a subtle sage-slate tint, borders are less stark, and the orange accent
+is slightly muted. A restrained teal is reserved for informational state colors
+so the interface is not only white, gray, and orange.
+
 ## Repository and branch setup
 
 - Upstream repository: `https://github.com/mutonby/openshorts.git`

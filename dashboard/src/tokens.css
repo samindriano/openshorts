@@ -1,38 +1,38 @@
-/* OpenShorts · light neutral product palette · design-system tokens
+/* OpenShorts · soft sage-slate product palette · design-system tokens
  * macrostructure: Marquee Hero (marketing) / Workbench (app) / Long Document (content)
  * nav: N9 edge-aligned · footer: Ft5 statement · enrichment: filament apparatus (landing only)
  */
 
 :root {
   /* surfaces */
-  --color-paper: #f4f4f1;
-  --color-paper-2: #ebebe7;
-  --color-paper-3: #e3e3de;
-  --color-card: #fafaf7;
+  --color-paper: #edf1ef;
+  --color-paper-2: #e4e9e7;
+  --color-paper-3: #dbe2df;
+  --color-card: #f7f9f8;
 
   /* ink */
-  --color-ink: #20201e;
-  --color-ink-2: #3f3f3b;
-  --color-muted: #5f5f5a;
+  --color-ink: #202421;
+  --color-ink-2: #3e4945;
+  --color-muted: #5f6a65;
 
   /* rules */
-  --color-rule: #dadad4;
-  --color-rule-2: #c9c9c2;
-  --rule-blueprint: #e0e0da;
+  --color-rule: #d2dbd7;
+  --color-rule-2: #bbc8c2;
+  --rule-blueprint: #d9e2de;
 
   /* restrained brand accent */
-  --color-accent: #e86f2a;
+  --color-accent: #dc6c32;
   --color-accent-ink: #2d160a;
-  --color-accent-2: #c85a21;
+  --color-accent-2: #b85a27;
   --color-glow: transparent;
-  --color-paper-emit: rgb(232 111 42 / 0.035);
-  --color-focus: #e86f2a;
+  --color-paper-emit: rgb(220 108 50 / 0.03);
+  --color-focus: #dc6c32;
 
   /* states */
   --color-ok: #2e7d52;
   --color-danger: #b83c3c;
   --color-warn: #9a5d09;
-  --color-info: #3f6f9f;
+  --color-info: #527c78;
 
   /* type */
   --font-display: "Instrument Serif", ui-serif, Georgia, serif;
