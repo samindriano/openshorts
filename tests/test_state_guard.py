@@ -55,8 +55,7 @@ def test_journal_wins_after_restart(tmp_path):
 
     assert sg.repair_job(core, job_id)
     assert core.jobs[job_id]["result"]["clips"][0]["video_url"].endswith(new)
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
+    meta = json.load(open(meta_path, encoding="utf-8"))
     assert meta["shorts"][0]["video_url"].endswith(new)
     assert meta["shorts"][0]["subtitle_config"] == {"fontSize": 20}
 
@@ -110,7 +109,7 @@ def test_invalid_pointer_uses_revision_not_restored_mtime(tmp_path):
     assert core.jobs[job_id]["result"]["clips"][0]["video_url"].endswith(newer)
 
 
-def test_snapshot_atomically_mirrors_memory_to_metadata_and_journal(tmp_path):
+def test_snapshot_commits_memory_to_journal_without_racing_metadata(tmp_path):
     base = "video"
     clean = f"{base}_clip_1.mp4"
     new = f"subtitled_1790000000000000000_{clean}"
@@ -125,11 +124,9 @@ def test_snapshot_atomically_mirrors_memory_to_metadata_and_journal(tmp_path):
     })
 
     assert sg.snapshot_job(core, job_id)
-    with open(meta_path, encoding="utf-8") as f:
-        meta = json.load(f)
-    with open(job_dir / sg.STATE_FILE, encoding="utf-8") as f:
-        journal = json.load(f)
-    assert meta["shorts"][0]["video_url"].endswith(new)
+    meta = json.load(open(meta_path, encoding="utf-8"))
+    journal = json.load(open(job_dir / sg.STATE_FILE, encoding="utf-8"))
+    assert meta["shorts"][0]["video_url"].endswith(clean)
     assert journal["clips"][0]["video_url"].endswith(new)
     assert journal["clips"][0]["subtitle_config"]["captions"][0]["text"] == "baru"
 
@@ -156,35 +153,40 @@ def test_state_mutation_filter_is_narrow():
     assert not sg.is_state_mutation("/api/subtitle", "GET")
 
 
-def test_asgi_guard_snapshots_before_success_body(monkeypatch):
+def test_asgi_guard_snapshots_target_before_success_is_released(monkeypatch):
     import asyncio
 
     events = []
 
     async def inner(scope, receive, send):
+        request = await receive()
+        assert b'"job_id": "job-1"' in request.get("body", b"")
         await send({"type": "http.response.start", "status": 200, "headers": []})
         await send({"type": "http.response.body", "body": b"ok", "more_body": False})
 
-    core = SimpleNamespace()
+    def fake_snapshot(_core, job_id):
+        events.append(f"snapshot:{job_id}")
+        return True
 
-    def fake_snapshot(_core):
-        events.append("snapshot")
-        return 1
-
-    monkeypatch.setattr(sg, "snapshot_all", fake_snapshot)
-    guard = sg.ClipStateGuard(inner, core)
+    monkeypatch.setattr(sg, "snapshot_job", fake_snapshot)
+    guard = sg.ClipStateGuard(inner, SimpleNamespace())
 
     async def send(message):
         if message["type"] == "http.response.body":
             events.append("body")
 
+    sent_request = False
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal sent_request
+        if sent_request:
+            return {"type": "http.disconnect"}
+        sent_request = True
+        return {"type": "http.request", "body": b'{"job_id": "job-1"}', "more_body": False}
 
     asyncio.run(guard(
         {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
     ))
-    assert events == ["snapshot", "body"]
+    assert events == ["snapshot:job-1", "body"]
 
 
 def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
@@ -193,22 +195,61 @@ def test_asgi_guard_does_not_snapshot_failed_mutation(monkeypatch):
     calls = []
 
     async def inner(scope, receive, send):
+        await receive()
         await send({"type": "http.response.start", "status": 500, "headers": []})
         await send({"type": "http.response.body", "body": b"no", "more_body": False})
 
-    monkeypatch.setattr(sg, "snapshot_all", lambda core: calls.append(1))
+    monkeypatch.setattr(sg, "snapshot_job", lambda core, job_id: calls.append(job_id) or True)
     guard = sg.ClipStateGuard(inner, SimpleNamespace())
 
     async def send(message):
         pass
 
+    used = False
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal used
+        if used:
+            return {"type": "http.disconnect"}
+        used = True
+        return {"type": "http.request", "body": b'{"job_id":"job-1"}', "more_body": False}
 
     asyncio.run(guard(
         {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
     ))
     assert calls == []
+
+
+def test_asgi_guard_fails_closed_when_commit_cannot_be_persisted(monkeypatch):
+    import asyncio
+
+    statuses = []
+    bodies = []
+
+    async def inner(scope, receive, send):
+        await receive()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send({"type": "http.response.body", "body": b'{"success":true}', "more_body": False})
+
+    monkeypatch.setattr(sg, "snapshot_job", lambda core, job_id: False)
+    guard = sg.ClipStateGuard(inner, SimpleNamespace())
+
+    async def send(message):
+        if message["type"] == "http.response.start": statuses.append(message["status"])
+        if message["type"] == "http.response.body": bodies.append(message.get("body", b""))
+
+    used = False
+    async def receive():
+        nonlocal used
+        if used:
+            return {"type": "http.disconnect"}
+        used = True
+        return {"type": "http.request", "body": b'{"job_id":"job-1"}', "more_body": False}
+
+    asyncio.run(guard(
+        {"type": "http", "path": "/api/subtitle", "method": "POST"}, receive, send
+    ))
+    assert statuses == [500]
+    assert b"durable state commit failed" in bodies[0]
 
 
 def test_asgi_guard_repairs_before_startup_complete(monkeypatch):
