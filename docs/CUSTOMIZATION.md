@@ -9,6 +9,17 @@ finance/podcast clipping project. Custom clip-selection logic, prompts, UI
 redesign, n8n, TikTok auto-publishing, and affiliate functionality are out of
 scope until the baseline is tested manually.
 
+## Dashboard palette update
+
+The dashboard now has a palette-only light-neutral treatment on
+`custom/tiktok-finance`. The existing layout, navigation, typography,
+controls, animations, API calls, and video/render-specific colors were
+preserved. Shared tokens in `dashboard/src/tokens.css` and
+`dashboard/tailwind.config.js` now use warm off-white surfaces, graphite text,
+neutral borders, semantic state colors, and a restrained burnt-orange accent.
+Cards no longer use the previous radial orange glow. This is intentionally a
+visual review checkpoint, not a second layout redesign.
+
 ## Repository and branch setup
 
 - Upstream repository: `https://github.com/mutonby/openshorts.git`

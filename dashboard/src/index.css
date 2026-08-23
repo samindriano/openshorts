@@ -1,4 +1,4 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app */
+/* OpenShorts · light neutral application shell */
 @import url('https://fonts.googleapis.com/css2?family=Noto+Serif:wght@700&display=swap'); /* hook-overlay font burned into videos — not UI */
 @import './tokens.css';
 @tailwind base;
@@ -25,14 +25,13 @@
 }
 
 @layer components {
-  /* hairline card, lit from within — replaces every glass/surface card */
+  /* Shared card surface: neutral, opaque, and intentionally low-emphasis. */
   .card,
   .glass-panel {
-    background:
-      radial-gradient(120% 90% at 50% 0%, var(--color-paper-emit) 0%, transparent 70%),
-      var(--color-paper-2);
+    background: var(--color-card);
     border: 1px solid var(--color-rule);
     border-radius: var(--radius-card);
+    box-shadow: 0 1px 2px rgb(31 31 29 / 0.04);
   }
 
   .card-hover {
@@ -67,7 +66,7 @@
 
   .input-field {
     @apply w-full text-sm text-ink2;
-    background: var(--color-paper);
+    background: var(--color-card);
     border: 1px solid var(--color-rule-2);
     border-radius: var(--radius-input);
     padding: 0.75rem 1rem;

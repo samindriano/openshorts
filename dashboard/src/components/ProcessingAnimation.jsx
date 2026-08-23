@@ -116,7 +116,7 @@ const ProcessingAnimation = ({ media, isComplete, syncedTime, isSyncedPlaying, s
       {!isSyncedPlaying && !isComplete && (
         <>
             <div className="absolute inset-0 bg-[linear-gradient(var(--rule-blueprint)_1px,transparent_1px),linear-gradient(90deg,var(--rule-blueprint)_1px,transparent_1px)] bg-[size:40px_40px] z-10 pointer-events-none"></div>
-            <div className="absolute left-0 w-full h-[2px] bg-brass shadow-[0_0_15px_2px_var(--color-glow)] animate-[scan_2.5s_linear_infinite] z-20 pointer-events-none"></div>
+            <div className="absolute left-0 w-full h-[2px] bg-brass animate-[scan_2.5s_linear_infinite] z-20 pointer-events-none"></div>
             <div className="absolute left-0 w-full h-[15%] bg-[var(--color-paper-emit)] animate-[scan-overlay_2.5s_linear_infinite] z-10 pointer-events-none"></div>
         </>
       )}
