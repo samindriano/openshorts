@@ -9,7 +9,12 @@ This document covers performance changes that preserve the existing clip-selecti
 The overlay changes compute engines only:
 
 - faster-whisper: CPU int8 -> CUDA float16
+- YOLO fallback detection and TransNetV2 scene detection -> CUDA
 - ffmpeg video encode: x264 -> `auto` (NVENC when the runtime probe succeeds, otherwise x264)
+
+The MediaPipe BlazeFace detector still uses its CPU TFLite delegate on this
+stack; that is expected and is separate from the Whisper/YOLO/scene/encode GPU
+paths.
 
 It does **not** change:
 
