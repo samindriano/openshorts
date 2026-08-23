@@ -11,6 +11,7 @@ from pydantic import BaseModel
 
 from clip_selection import (clip_count_targets, clip_duration_bounds,
                             lookup_model_prices)
+import gemini_rate_limiter
 
 load_dotenv()
 
@@ -520,20 +521,31 @@ def main() -> int:
     prompt = template.format(**fmt)
 
     _log(f"🤖 Gemini worker request: mode={args.mode} strategy={args.strategy} model={model_name} items={len(payload.get('windows', []))}")
-    response = client.models.generate_content(
-        model=model_name,
-        contents=prompt,
-        config=config,
-    )
+    response_holder = {}
 
+    def _handle_response(response):
+        response_holder["response"] = response
+        raise_if_blocked(response)
+        # With response_schema the SDK returns an already-validated object;
+        # fall back to the text-repair path only when that is unavailable.
+        parsed_obj = getattr(response, "parsed", None)
+        if parsed_obj is not None:
+            return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+        return _parse_json_response_text(_get_response_text(response))
+
+    parsed = gemini_rate_limiter.call_with_retry(
+        lambda: client.models.generate_content(
+            model=model_name,
+            contents=prompt,
+            config=config,
+        ),
+        label=f"worker {args.mode}",
+        estimated_tokens=gemini_rate_limiter.estimate_tokens(prompt),
+        handle_response=_handle_response,
+        non_retryable_exceptions=(GeminiBlockedError,),
+    )
+    response = response_holder["response"]
     raw_text = _get_response_text(response)
-    # With response_schema the SDK returns an already-validated object; fall
-    # back to the text-repair path only when that is unavailable.
-    parsed_obj = getattr(response, "parsed", None)
-    if parsed_obj is not None:
-        parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-    else:
-        parsed = _parse_json_response_text(raw_text)
     result = {
         "mode": args.mode,
         "payload": parsed,

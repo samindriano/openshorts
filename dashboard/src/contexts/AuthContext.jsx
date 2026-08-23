@@ -14,7 +14,12 @@ const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
 
 export function AuthProvider({ children }) {
-  const [config, setConfig] = useState({ billingEnabled: false, googleAuthEnabled: false });
+  const [config, setConfig] = useState({
+    billingEnabled: false,
+    googleAuthEnabled: false,
+    gemini_configured: false,
+    openai_configured: false,
+  });
   const [me, setMe] = useState(null);           // /api/me payload, or null when signed out
   const [loading, setLoading] = useState(true);
   const [signingIn, setSigningIn] = useState(false);
@@ -134,6 +139,11 @@ export function AuthProvider({ children }) {
   const value = {
     billingEnabled: config.billingEnabled,
     googleAuthEnabled: config.googleAuthEnabled,
+    // Server-side provider availability is a boolean-only self-host signal.
+    // The API omits these fields in hosted mode; the defaults above keep that
+    // path false without exposing or inventing any key material.
+    serverGeminiConfigured: !config.billingEnabled && config.gemini_configured === true,
+    serverOpenaiConfigured: !config.billingEnabled && config.openai_configured === true,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
     loading,
     signingIn,

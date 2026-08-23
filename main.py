@@ -21,7 +21,10 @@ from google import genai
 from google.genai import types as genai_types
 
 import gemini_worker
+import gemini_rate_limiter
 import layout_picker
+import clip_ai
+from ai_provider import normalize_provider
 from clip_selection import (build_transcript_windows, clip_count_targets,
                             clip_duration_bounds, snap_clip_to_words)
 from ffmpeg_utils import (video_encode_args, audio_encode_args, QUALITY,
@@ -92,6 +95,25 @@ face_detection = mp_face_detection.FaceDetection(model_selection=1, min_detectio
 # damping can be dialled back without a deploy; 1 restores the old behaviour.
 JUMP_CONFIRM_FRAMES = max(int(os.environ.get("JUMP_CONFIRM_FRAMES", "3")), 1)
 
+# The detector is intentionally sampled every few frames. A confirmed target
+# is still the source of truth, but filtering it before the camera follows it
+# keeps one-pixel face-box changes from becoming visible micro-pans. The
+# values are conservative: the existing safe zone still prevents the camera
+# from chasing normal head movement, while the speed/acceleration limits keep
+# a real subject move in frame without snapping.
+try:
+    TARGET_SMOOTHING = min(max(float(os.environ.get("TARGET_SMOOTHING", "0.32")), 0.05), 1.0)
+except ValueError:
+    TARGET_SMOOTHING = 0.32
+try:
+    CAMERA_MAX_SPEED = min(max(float(os.environ.get("CAMERA_MAX_SPEED", "12.0")), 1.0), 30.0)
+except ValueError:
+    CAMERA_MAX_SPEED = 12.0
+try:
+    CAMERA_ACCELERATION = min(max(float(os.environ.get("CAMERA_ACCELERATION", "0.30")), 0.05), 1.0)
+except ValueError:
+    CAMERA_ACCELERATION = 0.30
+
 
 class SmoothedCameraman:
     """
@@ -110,6 +132,8 @@ class SmoothedCameraman:
         # Initial State
         self.current_center_x = video_width / 2
         self.target_center_x = video_width / 2
+        self.filtered_target_center_x = self.target_center_x
+        self._camera_step = 0.0
 
         # Calculate crop dimensions once
         self.crop_height = video_height
@@ -175,31 +199,39 @@ class SmoothedCameraman:
         """
         if force_snap:
             self.current_center_x = self.target_center_x
+            self.filtered_target_center_x = self.target_center_x
+            self._camera_step = 0.0
         else:
-            diff = self.target_center_x - self.current_center_x
-            
-            # SIMPLIFIED LOGIC:
-            # 1. Is the target outside the safe zone?
+            # Filter the confirmed target separately from target_center_x. The
+            # latter remains immediate so the existing jump confirmation and
+            # tracker hysteresis contracts do not change.
+            self.filtered_target_center_x += (
+                self.target_center_x - self.filtered_target_center_x
+            ) * TARGET_SMOOTHING
+            diff = self.filtered_target_center_x - self.current_center_x
+
+            # Keep the safe-zone deadband, then ease the camera step toward a
+            # bounded speed. This removes the old 3px/15px step change that
+            # made the crop visibly jerk whenever a detection crossed the
+            # threshold.
             if abs(diff) > self.safe_zone_radius:
-                # 2. If yes, move towards it slowly (Linear Speed)
-                # Determine direction
+                desired_step = min(CAMERA_MAX_SPEED,
+                                   max(1.0, abs(diff) * 0.16))
+            else:
+                desired_step = 0.0
+            self._camera_step += (
+                desired_step - self._camera_step
+            ) * CAMERA_ACCELERATION
+
+            if abs(diff) > self.safe_zone_radius and self._camera_step > 0:
                 direction = 1 if diff > 0 else -1
-                
-                # Speed: 2 pixels per frame (Slow pan)
-                # If the distance is HUGE (scene change or fast movement), speed up slightly
-                if abs(diff) > self.crop_width * 0.5:
-                    speed = 15.0 # Fast re-frame
-                else:
-                    speed = 3.0  # Slow, steady pan
-                
-                self.current_center_x += direction * speed
-                
-                # Check if we overshot (prevent oscillation)
-                new_diff = self.target_center_x - self.current_center_x
+                step = min(abs(diff), self._camera_step)
+                self.current_center_x += direction * step
+
+                # Check if we overshot (prevent oscillation).
+                new_diff = self.filtered_target_center_x - self.current_center_x
                 if (direction == 1 and new_diff < 0) or (direction == -1 and new_diff > 0):
-                    self.current_center_x = self.target_center_x
-            
-            # If inside safe zone, DO NOTHING (Stationary Camera)
+                    self.current_center_x = self.filtered_target_center_x
                 
         # Clamp center
         half_crop = self.crop_width / 2
@@ -608,7 +640,7 @@ def plan_download_attempts(direct_first, statics, paid, have_hd):
     """Ordered (label, capped, proxy) download plan — pure, unit-tested.
 
     Cheapest bandwidth first: the server's own IP, then the flat-rate static
-    ISP proxies (uncapped 1080p, free bytes), then the per-GB paid proxy
+    ISP proxies (uncapped 1440p, free bytes), then the per-GB paid proxy
     (720p cost cap), and last the conservative fallback strategy through the
     paid proxy (or a static/direct when no paid proxy is configured).
     ``capped`` marks attempts whose bytes are billed per GB."""
@@ -707,9 +739,9 @@ def download_youtube_video(url, output_dir="."):
             return ('bestvideo[vcodec^=avc1][height<=720][ext=mp4]+bestaudio[ext=m4a]/'
                     'bestvideo[vcodec^=avc1][height<=720]+bestaudio/'
                     'best[height<=720][ext=mp4]/best[height<=720]/best')
-        return ('bestvideo[vcodec^=avc1][height<=1080][ext=mp4]+bestaudio[ext=m4a]/'
-                'bestvideo[vcodec^=avc1][height<=1080]+bestaudio/'
-                'best[height<=1080][ext=mp4]/best[ext=mp4]/best')
+        return ('bestvideo[vcodec^=avc1][height<=1440][ext=mp4]+bestaudio[ext=m4a]/'
+                'bestvideo[vcodec^=avc1][height<=1440]+bestaudio/'
+                'best[height<=1440][ext=mp4]/best[ext=mp4]/best')
     fallback_fmt = 'best[ext=mp4]/best'
 
     def _base_opts(extractor_args, proxy):
@@ -875,7 +907,7 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
         style = _subs.AUTO_CAPTION_STYLE
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
-        generation_id = int(time.time())
+        generation_id = time.time_ns()
         # The output name MUST stay exactly "subtitled_<ts>_<clip filename>":
         # the modal's walk-back and _canonical_clip_file both reconstruct the
         # clean original from it, so trimming the stem here would orphan the
@@ -952,7 +984,7 @@ def auto_hook_clip(clip_path, clip):
             style = "classic"
         output_dir = os.path.dirname(clip_path)
         out_path = os.path.join(
-            output_dir, f"hooked_{int(time.time())}_{os.path.basename(clip_path)}")
+            output_dir, f"hooked_{time.time_ns()}_{os.path.basename(clip_path)}")
         add_hook_to_video(clip_path, text, out_path, position="top",
                           duration=seconds, style=style)
         print(f"   🪝 Hook burned ({style}, {seconds:g}s): {text}")
@@ -1199,9 +1231,9 @@ def process_video_to_vertical(input_video, final_output_video, aspect_ratio=ASPE
                 # Crop
                 if y2 > y1 and x2 > x1:
                     cropped = frame[y1:y2, x1:x2]
-                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
+                    output_frame = cv2.resize(cropped, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
                 else:
-                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LINEAR)
+                    output_frame = cv2.resize(frame, (OUTPUT_WIDTH, OUTPUT_HEIGHT), interpolation=cv2.INTER_LANCZOS4)
 
             t_wr = time.time()
             encoder.stdin.write(output_frame.tobytes())
@@ -1267,161 +1299,30 @@ def transcribe_video(video_path):
 
     return transcript
 
-def _run_gemini_stage(client, model_name, prompt, schema):
-    """One schema-enforced Gemini call with transient-error backoff.
-    Returns (parsed_dict, cost_analysis)."""
-    config = genai_types.GenerateContentConfig(
-        response_mime_type="application/json",
-        response_schema=schema,
-    )
-    max_attempts = 3
-    for attempt in range(1, max_attempts + 1):
-        try:
-            response = client.models.generate_content(model=model_name, contents=prompt, config=config)
-            # Policy blocks are deterministic — retrying only burns quota and
-            # time, and the user deserves the real reason instead of a generic
-            # "empty response" (prod 23-jul: PROHIBITED_CONTENT on every try).
-            gemini_worker.raise_if_blocked(response)
-            # Parsing lives inside the retry loop on purpose: Gemini sometimes
-            # returns 200 with an empty body, which raises here rather than at
-            # the call. Retrying that recovered every occurrence seen in prod
-            # (22-jul-2026) — the same payload succeeds on the next attempt.
-            parsed_obj = getattr(response, "parsed", None)
-            if parsed_obj is not None:
-                parsed = parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
-            else:
-                parsed = gemini_worker._parse_json_response_text(
-                    gemini_worker._get_response_text(response))
-            return parsed, gemini_worker._calculate_cost_analysis(response, model_name)
-        except gemini_worker.GeminiBlockedError:
-            raise  # deterministic policy block — never retry
-        except Exception as e:
-            msg = str(e)
-            transient = any(tok in msg for tok in (
-                '503', 'UNAVAILABLE', '429', 'RESOURCE_EXHAUSTED',
-                '500', 'INTERNAL', 'overloaded', 'Deadline',
-                'empty response body', 'did not contain a JSON object',
-                'Failed to parse Gemini JSON response'))
-            if attempt == max_attempts or not transient:
-                raise
-            wait = 5 * (2 ** (attempt - 1))
-            print(f"⚠️ Gemini transient error (attempt {attempt}/{max_attempts}), retrying in {wait}s: {msg[:150]}")
-            time.sleep(wait)
+def _run_gemini_stage(client, model_name, prompt, schema,
+                      label="Gemini analysis"):
+    """Compatibility wrapper for existing Gemini retry tests and callers."""
+    return clip_ai._run_gemini_stage(
+        client, model_name, prompt, schema, label=label, sleep=time.sleep)
 
 
-def get_viral_clips(transcript_result, video_duration):
-    """Two-pass clip selection: score transcript windows, then detail the best.
-
-    Windowing gives even coverage on long videos (a single call over the whole
-    transcript clusters picks near the start), and the cheap scoring pass keeps
-    the expensive detail reasoning focused on the shortlist. Cuts are snapped to
-    word boundaries so clips don't start/end mid-word.
-    """
-    print("\U0001f916  Analyzing with Gemini (2-pass: score → detail)...")
-    api_key = os.getenv("GEMINI_API_KEY")
-    if not api_key:
-        print("❌ Error: GEMINI_API_KEY not found in environment variables.")
-        return None
-
-    client = genai.Client(api_key=api_key)
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    language = str(transcript_result.get('language') or 'unknown')
-    print(f"\U0001f916  Model: {model_name} | language: {language}")
-
-    # Full word list — ground truth for snapping cut points.
-    words = []
-    for segment in transcript_result['segments']:
-        for word in segment.get('words', []):
-            words.append({'w': word['word'], 's': word['start'], 'e': word['end']})
-
-    try:
-        # Scoring windows must be able to CONTAIN a max-length clip (the detail
-        # prompt keeps clips inside their candidate window), so scale them with
-        # the requested band — a user asking for 60-90s clips on the default
-        # 90s windows would get clips squeezed against the window walls.
-        min_secs, max_secs = clip_duration_bounds()
-        windows = build_transcript_windows(
-            transcript_result, video_duration,
-            window_seconds=max(90, int(max_secs * 1.5)))
-        print(f"   Built {len(windows)} scoring window(s).")
-        costs = []
-
-        # --- Pass 1: score windows in batches, keep the highest-scoring ---
-        scored = []
-        SCORE_BATCH = 8
-        for b in range(0, len(windows), SCORE_BATCH):
-            batch = windows[b:b + SCORE_BATCH]
-            payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in batch]
-            prompt = gemini_worker.SCORE_PROMPT_TEMPLATE.format(
-                video_duration=video_duration, language=language,
-                windows_json=json.dumps(payload, ensure_ascii=False))
-            parsed, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.ScoreResponse)
-            if cost:
-                costs.append(cost)
-            scored.extend(parsed.get("windows") or [])
-
-        # Shortlist the top windows; scale with duration so long videos surface
-        # more candidates without exploding the detail call.
-        scored.sort(key=lambda w: w.get("score", 0), reverse=True)
-        target = max(3, min(10, int(video_duration // 90) + 2))
-        by_id = {w["id"]: w for w in windows}
-        shortlist = [by_id[w["id"]] for w in scored[:target] if w.get("id") in by_id]
-        if not shortlist:
-            shortlist = windows[:target]  # scoring returned nothing usable
-        print(f"   Shortlisted {len(shortlist)} window(s) for detail.")
-
-        # --- Pass 2: detailed clip extraction on the shortlist ---
-        payload = [{"id": w["id"], "start": w["start"], "end": w["end"], "text": w["text"]} for w in shortlist]
-        min_clips, max_clips = clip_count_targets(len(shortlist))
-        prompt = gemini_worker.DETAIL_PROMPT_TEMPLATE.format(
-            video_duration=video_duration, language=language,
-            min_clips=min_clips, max_clips=max_clips,
-            min_secs=min_secs, max_secs=max_secs,
-            windows_json=json.dumps(payload, ensure_ascii=False))
-        detail, cost = _run_gemini_stage(client, model_name, prompt, gemini_worker.DetailResponse)
-        if cost:
-            costs.append(cost)
-
-        shorts = detail.get("shorts") or []
-        # Snap each proposed clip onto real word boundaries (+ a bit of silence).
-        for s in shorts:
-            ns, ne = snap_clip_to_words(s.get("start", 0), s.get("end", 0), words, video_duration,
-                                        min_duration=min_secs, max_duration=max_secs)
-            s["start"], s["end"] = ns, ne
-
-        # Aggregate cost across both passes.
-        cost_analysis = None
-        if costs:
-            cost_analysis = {
-                "input_tokens": sum(c.get("input_tokens", 0) for c in costs),
-                "output_tokens": sum(c.get("output_tokens", 0) for c in costs),
-                "total_cost": sum(c.get("total_cost", 0) for c in costs),
-                "model": model_name,
-            }
-            print(f"\U0001f4b0 Total cost ({model_name}, 2-pass, {len(costs)} calls): ${cost_analysis['total_cost']:.6f}")
-
-        if not shorts:
-            print("⚠️ 2-pass returned no clips.")
-            return None
-
-        result = {"shorts": shorts}
-        if cost_analysis:
-            result["cost_analysis"] = cost_analysis
-        return result
-    except gemini_worker.GeminiBlockedError as e:
-        # Content-policy rejection: propagate so the job fails with the real
-        # reason instead of a generic "no clips found".
-        print(f"🚫 {e}")
-        raise
-    except Exception as e:
-        print(f"❌ Gemini Error: {e}")
-        return None
+def get_viral_clips(transcript_result, video_duration, provider=None):
+    """Delegate transcript selection to the provider-agnostic core."""
+    return clip_ai.get_viral_clips(
+        transcript_result, video_duration,
+        provider=provider or os.getenv("AI_PROVIDER") or "gemini")
 
 
-def get_visual_clips(video_path, video_duration, language="en"):
+def get_visual_clips(video_path, video_duration, language="en", provider=None):
     """Clip a SILENT video by vision: Gemini watches the footage and picks the
     most engaging visual moments (no transcript). Returns the same
     {"shorts", "cost_analysis"} shape as get_viral_clips, or None."""
+    provider_name = normalize_provider(provider or os.getenv("AI_PROVIDER") or "gemini")
+    if provider_name == "openai":
+        raise RuntimeError(
+            "OpenAI provider currently requires a transcript for clip selection. "
+            "Choose Gemini for silent-video visual analysis."
+        )
     print("🎥  Silent video — analyzing with Gemini vision (no transcript)...")
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -1466,10 +1367,27 @@ def get_visual_clips(video_path, video_duration, language="en"):
             response_mime_type="application/json",
             response_schema=gemini_worker.VisualResponse,
         )
-        response = client.models.generate_content(
-            model=model_name, contents=[file_upload, prompt], config=config)
-        gemini_worker.raise_if_blocked(response)
-        parsed = json.loads(response.text)
+        response_holder = {}
+
+        def _handle_response(response):
+            response_holder["response"] = response
+            gemini_worker.raise_if_blocked(response)
+            parsed_obj = getattr(response, "parsed", None)
+            if parsed_obj is not None:
+                return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+            return gemini_worker._parse_json_response_text(
+                gemini_worker._get_response_text(response))
+
+        parsed = gemini_rate_limiter.call_with_retry(
+            lambda: client.models.generate_content(
+                model=model_name, contents=[file_upload, prompt], config=config),
+            label="visual clip selection",
+            estimated_tokens=gemini_rate_limiter.estimate_tokens(
+                prompt, extra_tokens=max(0, int(video_duration * 300))),
+            handle_response=_handle_response,
+            non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+            sleep=time.sleep,
+        )
         shorts = parsed.get("shorts") or []
         # Clamp to the real duration; drop anything degenerate.
         clean = []
@@ -1482,7 +1400,8 @@ def get_visual_clips(video_path, video_duration, language="en"):
             print("⚠️ Vision pass returned no usable clips.")
             return None
 
-        cost = gemini_worker._calculate_cost_analysis(response, model_name)
+        cost = gemini_worker._calculate_cost_analysis(
+            response_holder.get("response"), model_name)
         if cost:
             print(f"💰 Vision cost ({model_name}): ${cost.get('total_cost', 0):.6f}")
         result = {"shorts": clean}
@@ -1565,6 +1484,8 @@ if __name__ == '__main__':
         print(f"❌ Input file not found: {input_video}")
         exit(1)
 
+    analysis_provider = normalize_provider(os.getenv("AI_PROVIDER") or "gemini")
+
     # Layout choice is per SOURCE video, not per clip: one upload and one call
     # instead of one per clip, and the answer is a property of the material
     # ("this is a screencast"), which does not change between its own clips.
@@ -1616,18 +1537,21 @@ if __name__ == '__main__':
             except NoAudioError as e:
                 print(f"🔇 {e} — switching to visual analysis.")
 
-        # 4. Gemini Analysis (transcript-driven, or vision for silent videos)
+        # 4. Selected-provider analysis (transcript-driven, or Gemini vision for
+        # silent videos; OpenAI explicitly fails rather than falling through).
         if transcript is not None:
-            clips_data = get_viral_clips(transcript, duration)
+            clips_data = get_viral_clips(
+                transcript, duration, provider=analysis_provider)
         else:
-            clips_data = get_visual_clips(input_video, duration)
+            clips_data = get_visual_clips(
+                input_video, duration, provider=analysis_provider)
 
         if not clips_data or 'shorts' not in clips_data:
             # Deliberately fail instead of reframing the whole video: that path
             # wrote no metadata.json, so app.py marked the job failed anyway
             # (app.py:1087) after burning GPU on a render nobody could see.
             raise RuntimeError(
-                "Clip detection failed — Gemini did not return usable clips for this video.")
+                f"Clip detection failed — {analysis_provider} did not return usable clips for this video.")
         else:
             print(f"🔥 Found {len(clips_data['shorts'])} clips!")
 

@@ -33,16 +33,17 @@ interface HookLook {
   box: string | null;
   text: string;
   outlinePx: number;
+  accentColor: string | null;
   shadow: boolean;
 }
 
 const HOOK_LOOKS: Record<string, HookLook> = {
-  classic: { box: "rgba(255, 255, 255, 0.94)", text: "#000000", outlinePx: 0, shadow: true },
-  dark: { box: "rgba(18, 18, 20, 0.92)", text: "#FFFFFF", outlinePx: 0, shadow: true },
-  yellow: { box: "rgba(255, 214, 0, 0.96)", text: "#000000", outlinePx: 0, shadow: true },
-  red: { box: "rgba(220, 38, 38, 0.96)", text: "#FFFFFF", outlinePx: 0, shadow: true },
-  outline: { box: null, text: "#FFFFFF", outlinePx: 8, shadow: false },
-  outline_yellow: { box: null, text: "#FFD600", outlinePx: 8, shadow: false },
+  classic: { box: "rgba(248, 250, 252, 0.96)", text: "#0F172A", outlinePx: 0, accentColor: "#D3A64C", shadow: true },
+  dark: { box: "rgba(18, 18, 20, 0.92)", text: "#FFFFFF", outlinePx: 0, accentColor: null, shadow: true },
+  yellow: { box: "rgba(255, 214, 0, 0.96)", text: "#000000", outlinePx: 0, accentColor: null, shadow: true },
+  red: { box: "rgba(220, 38, 38, 0.96)", text: "#FFFFFF", outlinePx: 0, accentColor: null, shadow: true },
+  outline: { box: null, text: "#FFFFFF", outlinePx: 8, accentColor: null, shadow: false },
+  outline_yellow: { box: null, text: "#FFD600", outlinePx: 8, accentColor: null, shadow: false },
 };
 
 export const HookOverlay: React.FC<HookOverlayProps> = ({ config }) => {
@@ -119,8 +120,8 @@ const HookBox: React.FC<HookBoxProps> = ({ config, displayFrames }) => {
   const positionStyle = POSITION_STYLE[config.position] ?? POSITION_STYLE.top;
   const look = HOOK_LOOKS[config.style ?? "classic"] ?? HOOK_LOOKS.classic;
 
-  // Base font size: 5% of 1080 width (matches hooks.py logic)
-  const baseFontSize = 1080 * 0.05;
+  // Keep the preview aligned with hooks.py's slightly smaller title-card type.
+  const baseFontSize = 1080 * 0.046;
   const fontSize = Math.round(baseFontSize * scale);
   const outlinePx = Math.round(look.outlinePx * scale);
 
@@ -141,12 +142,26 @@ const HookBox: React.FC<HookBoxProps> = ({ config, displayFrames }) => {
           transform: `scale(${animScale}) translateY(${animTranslateY}px)`,
           maxWidth: "90%",
           backgroundColor: look.box ?? "transparent",
-          borderRadius: 20,
-          padding: look.box ? `${25 * scale}px ${30 * scale}px` : 0,
-          boxShadow: look.shadow ? "5px 5px 15px rgba(0, 0, 0, 0.25)" : "none",
+          position: "relative",
+          borderRadius: 24,
+          padding: look.box ? `${28 * scale}px ${36 * scale}px` : 0,
+          boxShadow: look.shadow ? "0 8px 18px rgba(0, 0, 0, 0.26)" : "none",
           textAlign: "center",
         }}
       >
+        {look.accentColor && (
+          <div
+            style={{
+              position: "absolute",
+              left: 14 * scale,
+              top: 14 * scale,
+              bottom: 14 * scale,
+              width: 8 * scale,
+              borderRadius: 4 * scale,
+              backgroundColor: look.accentColor,
+            }}
+          />
+        )}
         <span
           style={{
             fontFamily: `'${NOTO_SERIF_FONT_FAMILY}', 'Noto Serif', Georgia, serif`,

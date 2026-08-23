@@ -1,4 +1,4 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app */
+/* OpenShorts · light neutral application shell */
 @import url('https://fonts.googleapis.com/css2?family=Noto+Serif:wght@700&display=swap'); /* hook-overlay font burned into videos — not UI */
 @import './tokens.css';
 @tailwind base;
@@ -25,14 +25,13 @@
 }
 
 @layer components {
-  /* hairline card, lit from within — replaces every glass/surface card */
+  /* Shared card surface: neutral, opaque, and intentionally low-emphasis. */
   .card,
   .glass-panel {
-    background:
-      radial-gradient(120% 90% at 50% 0%, var(--color-paper-emit) 0%, transparent 70%),
-      var(--color-paper-2);
+    background: var(--color-card);
     border: 1px solid var(--color-rule);
     border-radius: var(--radius-card);
+    box-shadow: 0 1px 2px rgb(32 32 30 / 0.06);
   }
 
   .card-hover {
@@ -48,26 +47,27 @@
   /* mono UPPERCASE micro label — the only uppercase surface */
   .eyebrow {
     font-family: var(--font-mono);
-    font-size: 11px;
-    font-weight: 500;
+    font-size: 12px;
+    font-weight: 600;
     letter-spacing: var(--tracking-micro);
     text-transform: uppercase;
     color: var(--color-ink);
-    opacity: 0.55;
+    opacity: 0.76;
   }
 
   /* mono value chip for machine data: 00:42 · 9:16 · $0.65 */
   .readout {
     font-family: var(--font-mono);
-    font-size: 10.5px;
-    letter-spacing: var(--tracking-micro);
+    font-size: 11.5px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
     text-transform: uppercase;
-    color: var(--color-muted);
+    color: var(--color-ink-2);
   }
 
   .input-field {
     @apply w-full text-sm text-ink2;
-    background: var(--color-paper);
+    background: var(--color-card);
     border: 1px solid var(--color-rule-2);
     border-radius: var(--radius-input);
     padding: 0.75rem 1rem;
@@ -78,7 +78,7 @@
   .input-field:focus { border-color: var(--color-accent); }
 
   .btn-primary {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium;
     background: var(--color-accent);
     color: var(--color-accent-ink);
     border-radius: 999px;
@@ -89,7 +89,7 @@
   .btn-primary:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .btn-ghost {
-    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium lowercase text-ink;
+    @apply inline-flex items-center justify-center gap-2 px-6 py-3 text-sm font-medium text-ink;
     background: transparent;
     border: 1px solid var(--color-rule-2);
     border-radius: 999px;
@@ -100,7 +100,7 @@
   .btn-ghost:disabled { opacity: 0.45; cursor: not-allowed; }
 
   .btn-quiet {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm lowercase text-ink2;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm text-ink2;
     background: var(--color-paper-3);
     border-radius: 999px;
     transition: filter var(--dur-short) var(--ease-out);
@@ -108,7 +108,7 @@
   .btn-quiet:hover { filter: brightness(1.15); }
 
   .btn-danger {
-    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm lowercase;
+    @apply inline-flex items-center justify-center gap-2 px-4 py-2 text-sm;
     color: var(--color-danger);
     border: 1px solid color-mix(in oklab, var(--color-danger) 40%, transparent);
     border-radius: 999px;

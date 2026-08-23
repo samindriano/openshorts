@@ -51,7 +51,7 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
             isOpen={isOpen}
             onClose={isProcessing ? undefined : onClose}
             eyebrow="DUB"
-            title="dub voice"
+                title="Dub Voice"
             size="md"
             footer={
                 <div className="flex gap-3">
@@ -136,8 +136,8 @@ export default function TranslateModal({ isOpen, onClose, onTranslate, isProcess
                     <div className="flex items-center gap-3">
                         <Loader2 size={18} className="text-brass animate-spin" />
                         <div>
-                            <p className="text-sm text-ink font-medium lowercase">Dubbing audio...</p>
-                            <p className="text-xs text-muted lowercase">This may take a few minutes</p>
+                                <p className="text-sm text-ink font-medium">Dubbing Audio...</p>
+                                <p className="text-sm text-muted">This may take a few minutes</p>
                         </div>
                     </div>
                 </div>

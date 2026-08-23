@@ -191,7 +191,8 @@ def download_font_if_needed():
 # color, and an optional text outline (color, px) for box-less looks.
 HOOK_STYLES = {
     # White card, black serif text (original look).
-    "classic": {"box": (255, 255, 255, 240), "text": (0, 0, 0), "outline": None, "shadow": True},
+    "classic": {"box": (248, 250, 252, 246), "text": (15, 23, 42), "outline": None, "shadow": True,
+                "accent": (211, 166, 76, 255)},
     # Dark card, white text.
     "dark":    {"box": (18, 18, 20, 235),    "text": (255, 255, 255), "outline": None, "shadow": True},
     # Bright yellow card, black text (high-contrast TikTok look).
@@ -219,17 +220,18 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
     outline = look["outline"]
     has_box = box_fill[3] > 0
     draw_shadow = look["shadow"]
+    accent = look.get("accent")
     
     # Configuration
-    padding_x = 30 # Balanced padding
-    padding_y = 25 
-    line_spacing = 20 # Increased spacing
-    cornerradius = 20
-    shadow_offset = (5, 5) 
-    shadow_blur = 10
+    padding_x = 36
+    padding_y = 28
+    line_spacing = 12
+    cornerradius = 24
+    shadow_offset = (0, 8)
     
-    # Font Size Calculation (approx 5% of width - tuned to match Noto Serif Bold metrics in browser)
-    base_font_size = int(target_width * 0.05)
+    # Font size is kept slightly below the old 5% card treatment so the hook
+    # reads as a title card, not a second subtitle layer.
+    base_font_size = int(target_width * 0.046)
     font_size = int(base_font_size * font_scale)
     
     try:
@@ -346,6 +348,12 @@ def create_hook_image(text, target_width, output_image_path="hook_overlay.png", 
             (20 + box_width, 20 + box_height)
         ]
         draw_final.rounded_rectangle(main_box, radius=cornerradius, fill=box_fill)
+        if accent:
+            accent_box = [
+                (20 + 14, 20 + 14),
+                (20 + 22, 20 + box_height - 14),
+            ]
+            draw_final.rounded_rectangle(accent_box, radius=4, fill=accent)
 
     # 5. Draw Text
     current_y = 20 + padding_y - 2 # Minor visual adjustment
@@ -395,7 +403,7 @@ def add_hook_to_video(video_path, text, output_path, position="top", font_scale=
         
     # 2. Generate Image
     # Box check: Don't let it be wider than 90% of screen
-    target_box_width = int(video_width * 0.9)
+    target_box_width = int(video_width * 0.88)
     
     # Unique per invocation so parallel jobs can't overwrite each other's overlay.
     # The uuid alone guarantees that; the source name rides along only as a

@@ -24,6 +24,7 @@ from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
+from ai_provider import normalize_provider, spec_for
 
 load_dotenv()
 
@@ -120,6 +121,22 @@ async def resolve_gemini(request: Request) -> Optional[str]:
     return os.environ.get("GEMINI_API_KEY")
 
 
+async def resolve_ai_key(request: Request, provider: str) -> Optional[str]:
+    """Resolve only the selected provider's key for a clip-generation job.
+
+    Hosted mode remains Gemini-managed. Self-hosted mode accepts the selected
+    provider's header and falls back to that provider's environment variable;
+    the other provider is deliberately never consulted.
+    """
+    provider = normalize_provider(provider)
+    if provider == "gemini":
+        return await resolve_gemini(request)
+    if BILLING_ENABLED:
+        return None
+    spec = spec_for(provider)
+    return request.headers.get(spec.key_header) or os.environ.get(spec.key_env)
+
+
 async def resolve_upload_post(request: Request, body_key: Optional[str] = None):
     """Resolve the Upload-Post key and the profile to post as.
 
@@ -176,6 +193,18 @@ def gemini_missing_error():
             "message": "This action needs an active plan. Choose a plan or add your own API key.",
         })
     return HTTPException(status_code=400, detail="Missing X-Gemini-Key header")
+
+
+def ai_provider_missing_error(provider: str):
+    provider = normalize_provider(provider)
+    if provider == "gemini":
+        return gemini_missing_error()
+    if BILLING_ENABLED:
+        return HTTPException(
+            status_code=400,
+            detail="OpenAI provider is not available in hosted mode.",
+        )
+    return HTTPException(status_code=400, detail="Missing X-OpenAI-Key header")
 
 
 # Probe rate limiter. In-memory, resets on restart by design — the hard monthly
@@ -449,6 +478,15 @@ def _canonical_clip_file(output_dir, base_name, index):
     return os.path.basename(max(derived, key=os.path.getmtime))
 
 
+def _clip_url_points_to_file(output_dir, video_url):
+    """Return whether a stored clip URL still names a usable local file."""
+    if not video_url:
+        return False
+    filename = os.path.basename(video_url.split("?", 1)[0])
+    path = os.path.join(output_dir, filename)
+    return bool(filename) and os.path.isfile(path) and os.path.getsize(path) > 0
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -540,7 +578,7 @@ def _recover_jobs_from_disk():
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
             for i, clip in enumerate(clips):
-                if not clip.get('video_url'):
+                if not _clip_url_points_to_file(job_path, clip.get('video_url')):
                     clip['video_url'] = (
                         f"/videos/{job_id}/"
                         f"{_canonical_clip_file(job_path, base_name, i)}")
@@ -555,7 +593,12 @@ def _recover_jobs_from_disk():
                 'logs': ["♻️ Job recovered from disk after server restart."],
                 'output_dir': job_path,
                 'user_id': owner,
-                'result': {'clips': clips, 'cost_analysis': data.get('cost_analysis')},
+                'result': {
+                    'clips': clips,
+                    'cost_analysis': data.get('cost_analysis'),
+                    'ai_provider': data.get('ai_provider'),
+                    'ai_model': data.get('ai_model'),
+                },
             }
             recovered += 1
         except Exception as e:
@@ -575,12 +618,14 @@ MAX_RESUME_ATTEMPTS = 2
 
 
 def _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id, watermark,
-                           webhook_url=None, webhook_secret=None, base_url=None):
+                           webhook_url=None, webhook_secret=None, base_url=None,
+                           ai_provider="gemini"):
     try:
         path = os.path.join(OUTPUT_DIR, job_id, _RESUME_FILE)
         with open(path, "w") as f:
             json.dump({
                 "cmd": cmd, "priority": priority,
+                "ai_provider": normalize_provider(ai_provider),
                 "user_id": None if user_id is None else str(user_id),
                 "reservation_id": reservation_id,
                 "watermark": bool(watermark), "attempts": 0,
@@ -654,13 +699,24 @@ def _resume_interrupted_jobs() -> set:
             continue
 
         # Rebuild env from scratch — the manifest holds no secrets. Managed
-        # (cloud) jobs get the server key; self-host falls back to its env key.
+        # (cloud) jobs get the server key; self-host falls back to the selected
+        # provider's env key. Never carry the unselected provider into a child.
         env = os.environ.copy()
+        try:
+            ai_provider = normalize_provider(m.get("ai_provider") or "gemini")
+        except ValueError:
+            ai_provider = "gemini"
+        for spec in (spec_for("gemini"), spec_for("openai")):
+            env.pop(spec.key_env, None)
+        selected_spec = spec_for(ai_provider)
         if BILLING_ENABLED and user_id is not None:
             try:
-                env["GEMINI_API_KEY"] = managed_keys.gemini_key()
+                env[selected_spec.key_env] = managed_keys.gemini_key()
             except Exception:
                 pass
+        elif os.environ.get(selected_spec.key_env):
+            env[selected_spec.key_env] = os.environ[selected_spec.key_env]
+        env["AI_PROVIDER"] = ai_provider
         if m.get("watermark"):
             env["WATERMARK"] = "1"
         else:
@@ -678,6 +734,7 @@ def _resume_interrupted_jobs() -> set:
             'logs': [f"♻️ Resuming your video after a server update (attempt {attempts})."],
             'cmd': m.get("cmd"),
             'env': env,
+            'ai_provider': ai_provider,
             'output_dir': job_path,
             'user_id': None if user_id is None else user_id,
             'reservation_id': reservation_id,
@@ -1271,10 +1328,12 @@ class ProcessRequest(BaseModel):
 # proxy URL that yt-dlp echoes in its verbose debug output) before the line is
 # ever printed to the server console or stored in the job log.
 _CREDENTIAL_URL_RE = re.compile(r'(\w+://)[^:/@\s]+:[^@/\s]+@')
+_API_KEY_RE = re.compile(r'(?i)\b(?:AIza[0-9A-Za-z_-]{20,}|sk-[0-9A-Za-z_-]{16,})\b')
 
 
 def _scrub_secrets(line: str) -> str:
-    return _CREDENTIAL_URL_RE.sub(r'\1***:***@', line)
+    scrubbed = _CREDENTIAL_URL_RE.sub(r'\1***:***@', line)
+    return _API_KEY_RE.sub('[REDACTED_API_KEY]', scrubbed)
 
 
 # Cloud users don't need (and shouldn't see) implementation details: the ingest
@@ -1391,7 +1450,12 @@ async def run_job(job_id, job_data):
                                  ready_clips.append(clip)
                         
                         if ready_clips:
-                             jobs[job_id]['result'] = {'clips': ready_clips, 'cost_analysis': cost_analysis}
+                             jobs[job_id]['result'] = {
+                                 'clips': ready_clips,
+                                 'cost_analysis': cost_analysis,
+                                 'ai_provider': data.get('ai_provider'),
+                                 'ai_model': data.get('ai_model'),
+                             }
             except Exception as e:
                 # Ignore read errors during processing
                 pass
@@ -1428,7 +1492,12 @@ async def run_job(job_id, job_data):
                      clip_filename = _canonical_clip_file(output_dir, base_name, i)
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
                 
-                jobs[job_id]['result'] = {'clips': clips, 'cost_analysis': cost_analysis}
+                jobs[job_id]['result'] = {
+                    'clips': clips,
+                    'cost_analysis': cost_analysis,
+                    'ai_provider': data.get('ai_provider'),
+                    'ai_model': data.get('ai_model'),
+                }
             else:
                  jobs[job_id]['status'] = 'failed'
                  jobs[job_id]['logs'].append("No metadata file generated.")
@@ -1449,12 +1518,22 @@ async def health():
 
 @app.get("/api/config")
 async def get_config():
-    return {
+    config = {
         "youtubeUrlEnabled": not DISABLE_YOUTUBE_URL,
         "billingEnabled": BILLING_ENABLED,
-        "googleAuthEnabled": bool(BILLING_ENABLED and cloud.settings.google_auth_enabled),
+        "googleAuthEnabled": bool(BILLING_ENABLED and cloud and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
     }
+    # Self-host users may rely on provider keys mounted into the server
+    # environment. Expose availability only as booleans; never expose the key
+    # material itself. Hosted mode deliberately omits these fields so managed
+    # provider configuration cannot be inferred from this endpoint.
+    if not BILLING_ENABLED:
+        config.update({
+            "gemini_configured": bool(os.environ.get("GEMINI_API_KEY")),
+            "openai_configured": bool(os.environ.get("OPENAI_API_KEY")),
+        })
+    return config
 
 async def _probe_youtube_quality(url: str) -> dict:
     """Run quality_probe.py in a worker thread; {} on any failure (fail-open)."""
@@ -1518,7 +1597,7 @@ LAYOUT_IMPLIES = {
 }
 
 
-def layout_env(requested):
+def layout_env(requested, provider=None):
     """Env overrides for the layouts this job allows. Unknown names are ignored
     rather than rejected: a newer dashboard must not break an older API.
 
@@ -1527,6 +1606,8 @@ def layout_env(requested):
     "auto,punch_in" means "decide the layout yourself, and punch in regardless".
     """
     env = {}
+    selected_provider = normalize_provider(
+        provider or os.environ.get("AI_PROVIDER") or "gemini")
     for name in requested or []:
         key = str(name).strip().lower()
         if key == "auto":
@@ -1534,6 +1615,10 @@ def layout_env(requested):
             continue
         var = LAYOUT_ENV.get(key)
         if not var:
+            continue
+        if key == "screencast" and selected_provider == "openai":
+            # The screencast detector still uses Gemini video upload/vision.
+            # Do not enable it for an OpenAI-selected job.
             continue
         env[var] = "1"
         for extra in LAYOUT_IMPLIES.get(key, []):
@@ -1557,12 +1642,9 @@ async def process_endpoint(
     clip_max_seconds: Optional[str] = Form(None),
     auto_hook: Optional[str] = Form(None),
     auto_hook_style: Optional[str] = Form(None),
-    thumbnail_session_id: Optional[str] = Form(None)
+    thumbnail_session_id: Optional[str] = Form(None),
+    ai_provider: Optional[str] = Form(None),
 ):
-    api_key = await resolve_gemini(request)
-    if not api_key:
-        raise gemini_missing_error()
-
     ack_flag = str(acknowledged).lower() in ("1", "true", "yes")
     force_low = str(force_low_quality).lower() in ("1", "true", "yes")
 
@@ -1583,6 +1665,17 @@ async def process_endpoint(
         auto_hook = body.get("auto_hook")
         auto_hook_style = body.get("auto_hook_style")
         thumbnail_session_id = body.get("thumbnail_session_id")
+        ai_provider = body.get("ai_provider")
+
+    try:
+        ai_provider = normalize_provider(ai_provider or "gemini")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    if BILLING_ENABLED and ai_provider == "openai":
+        raise ai_provider_missing_error(ai_provider)
+    api_key = await resolve_ai_key(request, ai_provider)
+    if not api_key:
+        raise ai_provider_missing_error(ai_provider)
 
     # Normalize output format (auto = keep pipeline default).
     if output_format not in ("vertical", "horizontal", "square"):
@@ -1672,12 +1765,18 @@ async def process_endpoint(
     # Prepare Command
     cmd = ["python", "-u", "main.py"] # -u for unbuffered
     env = os.environ.copy()
-    env["GEMINI_API_KEY"] = api_key # Override with key from request
+    # A child gets only the selected provider credential. This prevents an
+    # OpenAI job from accidentally falling through to Gemini in optional paths.
+    for spec in (spec_for("gemini"), spec_for("openai")):
+        env.pop(spec.key_env, None)
+    selected_spec = spec_for(ai_provider)
+    env["AI_PROVIDER"] = ai_provider
+    env[selected_spec.key_env] = api_key
 
     # Optional layouts are per job. The renderer reads these at import time in
     # the subprocess, so they must be set before Popen — same path WATERMARK
     # already takes.
-    chosen = layout_env(layouts)
+    chosen = layout_env(layouts, ai_provider)
     env.update(chosen)
     if chosen:
         print(f"[layouts] job={job_id} enabled={sorted(chosen)}")
@@ -1807,6 +1906,7 @@ async def process_endpoint(
         'logs': [f"Job {job_id} queued."],
         'cmd': cmd,
         'env': env,
+        'ai_provider': ai_provider,
         'output_dir': job_output_dir,
         'attestation': attestation,
         'user_id': user_id,
@@ -1832,7 +1932,7 @@ async def process_endpoint(
     _write_resume_manifest(job_id, cmd, priority, user_id, reservation_id,
                            watermark=jobs[job_id]['watermark'],
                            webhook_url=webhook_url, webhook_secret=webhook_secret,
-                           base_url=api_base)
+                           base_url=api_base, ai_provider=ai_provider)
 
     _enqueue_job(job_id, priority)
 
@@ -2036,7 +2136,7 @@ async def restore_project(job_id: str, request: Request):
         base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
         clips = data.get('shorts', [])
         for i, clip in enumerate(clips):
-            if not clip.get('video_url'):
+            if not _clip_url_points_to_file(job_dir, clip.get('video_url')):
                 clip['video_url'] = (
                     f"/videos/{job_id}/"
                     f"{_canonical_clip_file(job_dir, base_name, i)}")
@@ -2085,7 +2185,8 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
+from subtitles import (generate_srt, generate_ass, burn_subtitles,
+                       generate_srt_from_video, resolve_render_style)
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
@@ -2287,6 +2388,7 @@ class SubtitleRequest(BaseModel):
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
     style: str = "classic"  # classic (uniform color) or karaoke (word highlight)
+    animation: str = "none"  # none | pop | word-highlight | karaoke
     highlight_color: str = "#FFD700"
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
@@ -2296,6 +2398,37 @@ class SubtitleRequest(BaseModel):
     # instead of regenerating from the stored transcript — without this, text
     # edits in the modal were silently discarded on the server render path.
     words: Optional[List[CaptionWordIn]] = None
+
+
+def _subtitle_config_from_request(req: SubtitleRequest) -> dict:
+    """Return the complete subtitle recipe that produced the current file.
+
+    The rendered MP4 is authoritative for playback, but keeping the recipe in
+    metadata/project state lets the modal reopen with the same controls and
+    edited words instead of reconstructing defaults from the original transcript.
+    """
+    config = {
+        "position": req.position,
+        "fontSize": req.font_size,
+        "fontName": req.font_name,
+        "fontColor": req.font_color,
+        "highlightColor": req.highlight_color,
+        "borderColor": req.border_color,
+        "borderWidth": req.border_width,
+        "bgColor": req.bg_color,
+        "bgOpacity": req.bg_opacity,
+        "style": req.style,
+        "animation": req.animation,
+        "effect": req.effect,
+        "baseOpacity": req.base_opacity,
+        "uppercase": req.uppercase,
+    }
+    if req.words is not None:
+        config["captions"] = [
+            {"text": word.text, "startMs": word.startMs, "endMs": word.endMs}
+            for word in req.words
+        ]
+    return config
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
@@ -3204,6 +3337,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         raise HTTPException(status_code=404, detail="Clip not found")
         
     clip_data = clips[req.clip_index]
+    subtitle_config = _subtitle_config_from_request(req)
 
     # Recut clips concatenate several source segments, so their caption window
     # is not the flat start..end range — restyle against the clip-relative
@@ -3264,9 +3398,15 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
     # Define outputs
-    generation_id = int(time.time())
-    is_karaoke = req.style == "karaoke"
-    srt_filename = f"subs_{req.clip_index}_{generation_id}.{'ass' if is_karaoke else 'srt'}"
+    # Nanosecond ids are intentionally part of the render identity. A
+    # second-resolution timestamp lets two quick applies collide and makes the
+    # browser/R2 version contract ambiguous.
+    generation_id = time.time_ns()
+    revision = str(generation_id)
+    render_style, render_effect = resolve_render_style(
+        req.style, req.animation, req.effect)
+    is_karaoke = render_style == "karaoke"
+    srt_filename = f"subs_{req.clip_index}_{revision}.{'ass' if is_karaoke else 'srt'}"
     srt_path = os.path.join(output_dir, srt_filename)
 
     # Style options shared by the karaoke ASS generator paths.
@@ -3275,12 +3415,12 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         font_color=req.font_color, border_color=req.border_color,
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
-        effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        effect=render_effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
     )
 
     # Output video
     # We create a new file "subtitled_..."
-    output_filename = f"subtitled_{generation_id}_{filename}"
+    output_filename = f"subtitled_{revision}_{filename}"
     output_path = os.path.join(output_dir, output_filename)
 
     # Burning captions is FREE. They're table stakes for short-form — a clip
@@ -3342,31 +3482,46 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     if reservation_id:
         await _metering.commit_reservation(reservation_id)
 
-    # 3. Update Result and Metadata
-    # Update InMemory Jobs
-    if req.clip_index < len(job['result']['clips']):
-         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-    
-    # Update Metadata on Disk (Persistence)
-    try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-            # Update the main data structure
-            data['shorts'] = clips
-            
-            # Write back
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
+    # 3. Update the in-memory result and metadata from a fresh snapshot. The
+    # lock protects concurrent subtitle/rerender calls from writing one stale
+    # metadata document over another clip's newer version.
+    new_video_url = f"/videos/{req.job_id}/{output_filename}"
+    render_update = {
+        "video_url": new_video_url,
+        "render_revision": revision,
+        "subtitle_config": subtitle_config,
+    }
+    # Share the edit lock with rerender/reframe. Subtitle burns and clip edits
+    # both read/write metadata.json and the canonical file chain.
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        if req.clip_index < len(job['result']['clips']):
+            job['result']['clips'][req.clip_index].update(render_update)
+        try:
+            with open(json_files[0], 'r') as f:
+                current_data = json.load(f)
+            current_clips = current_data.get('shorts', [])
+            if req.clip_index < len(current_clips):
+                current_clips[req.clip_index].update(render_update)
+                current_data['shorts'] = current_clips
+                with open(json_files[0], 'w') as f:
+                    json.dump(current_data, f, indent=4)
                 print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
-        # Non-critical, but good for persistence
+        except Exception as e:
+            print(f"⚠️ Failed to update metadata.json: {e}")
+            raise HTTPException(status_code=500, detail="Could not persist subtitle render state")
 
     _archive_clip_edit_bg(req.job_id, req.clip_index, output_filename)
 
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+        "new_video_url": new_video_url,
+        "server_file": output_filename,
+        "revision": revision,
+        "source_file": filename,
+        "subtitle_config": subtitle_config,
+        "render_style": render_style,
+        "render_effect": render_effect,
     }
 
 class RemoveSubtitlesRequest(BaseModel):
@@ -3419,18 +3574,36 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
                             detail="The original clip is no longer available.")
 
     new_url = f"/videos/{req.job_id}/{filename}"
-    if req.clip_index < len(job.get('result', {}).get('clips', [])):
-        job['result']['clips'][req.clip_index]['video_url'] = new_url
-    try:
-        clips[req.clip_index]['video_url'] = new_url
-        data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
+    revision = f"remove-{time.time_ns()}"
+    render_update = {
+        "video_url": new_url,
+        "render_revision": revision,
+        "subtitle_config": None,
+    }
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        if req.clip_index < len(job.get('result', {}).get('clips', [])):
+            job['result']['clips'][req.clip_index].update(render_update)
+        try:
+            with open(json_files[0], 'r') as f:
+                current_data = json.load(f)
+            current_clips = current_data.get('shorts', [])
+            current_clips[req.clip_index].update(render_update)
+            current_data['shorts'] = current_clips
+            with open(json_files[0], 'w') as f:
+                json.dump(current_data, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Failed to update metadata.json: {e}")
+            raise HTTPException(status_code=500, detail="Could not persist subtitle removal state")
 
     _archive_clip_edit_bg(req.job_id, req.clip_index, filename)
-    return {"success": True, "new_video_url": new_url}
+    return {
+        "success": True,
+        "new_video_url": new_url,
+        "server_file": filename,
+        "revision": revision,
+        "subtitle_config": None,
+    }
 
 
 class HookRequest(BaseModel):
@@ -3502,7 +3675,7 @@ async def add_hook(req: HookRequest, request: Request):
         output_path = input_path
         reservation_id = None
     else:
-        output_filename = f"hooked_{int(time.time())}_{filename}"
+        output_filename = f"hooked_{time.time_ns()}_{filename}"
         output_path = os.path.join(output_dir, output_filename)
 
         # Map Size to Scale

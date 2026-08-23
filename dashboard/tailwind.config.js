@@ -7,25 +7,27 @@ export default {
   theme: {
     extend: {
       colors: {
-        // Lumen · Night Foundry — values mirror tokens.css (kept literal so
+        // Soft sage-slate palette — values mirror tokens.css (kept literal so
         // Tailwind alpha modifiers like bg-brass/10 compile)
-        paper: "oklch(13% 0.014 265 / <alpha-value>)",
-        paper2: "oklch(16.5% 0.015 265 / <alpha-value>)",
-        paper3: "oklch(20% 0.016 265 / <alpha-value>)",
-        ink: "oklch(96% 0.006 262 / <alpha-value>)",
-        ink2: "oklch(86% 0.01 262 / <alpha-value>)",
-        muted: "oklch(64% 0.012 262 / <alpha-value>)",
-        brass: "oklch(76% 0.17 50 / <alpha-value>)",
-        brassink: "oklch(17% 0.03 50 / <alpha-value>)",
-        coral: "oklch(68% 0.16 18 / <alpha-value>)",
-        ok: "oklch(75% 0.11 150 / <alpha-value>)",
-        warn: "oklch(78% 0.14 75 / <alpha-value>)",
-        danger: "oklch(66% 0.18 25 / <alpha-value>)",
+        paper: "rgb(237 241 239 / <alpha-value>)",
+        paper2: "rgb(228 233 231 / <alpha-value>)",
+        paper3: "rgb(219 226 223 / <alpha-value>)",
+        card: "rgb(247 249 248 / <alpha-value>)",
+        ink: "rgb(32 36 33 / <alpha-value>)",
+        ink2: "rgb(62 73 69 / <alpha-value>)",
+        muted: "rgb(95 106 101 / <alpha-value>)",
+        brass: "rgb(220 108 50 / <alpha-value>)",
+        brassink: "rgb(45 22 10 / <alpha-value>)",
+        coral: "rgb(184 90 39 / <alpha-value>)",
+        ok: "rgb(46 125 82 / <alpha-value>)",
+        warn: "rgb(154 93 9 / <alpha-value>)",
+        danger: "rgb(184 60 60 / <alpha-value>)",
+        info: "rgb(82 124 120 / <alpha-value>)",
         // legacy aliases so untouched files degrade gracefully
-        background: "oklch(13% 0.014 265 / <alpha-value>)",
-        surface: "oklch(16.5% 0.015 265 / <alpha-value>)",
-        primary: "oklch(76% 0.17 50 / <alpha-value>)",
-        accent: "oklch(68% 0.16 18 / <alpha-value>)",
+        background: "rgb(237 241 239 / <alpha-value>)",
+        surface: "rgb(228 233 231 / <alpha-value>)",
+        primary: "rgb(220 108 50 / <alpha-value>)",
+        accent: "rgb(184 90 39 / <alpha-value>)",
       },
       fontFamily: {
         display: "var(--font-display)",

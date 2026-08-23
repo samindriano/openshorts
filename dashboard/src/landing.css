@@ -1,4 +1,4 @@
-/* Hallmark · genre: atmospheric · macrostructure: Marquee Hero · theme: lumen (night) · design-system: design.md · designed-as-app · nav: N9 · footer: Ft5 · enrichment: filament apparatus */
+/* OpenShorts landing surface: shared light-neutral palette */
 
 /* ---- hero: blueprint grid + paper emission (top-right) ---- */
 .hero-blueprint {
@@ -55,8 +55,8 @@
   position: absolute;
   inset: 0;
   border-radius: 18px;
-  box-shadow: 0 0 28px 2px var(--color-glow);
-  opacity: 0.4;
+  box-shadow: 0 0 0 1px var(--color-rule-2);
+  opacity: 0.9;
   animation: filament-pulse var(--dur-pulse) var(--ease-out) infinite;
   pointer-events: none;
 }

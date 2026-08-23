@@ -1,37 +1,38 @@
-/* Hallmark · genre: atmospheric · theme: lumen (night foundry) · design-system: design.md · designed-as-app
+/* OpenShorts · soft sage-slate product palette · design-system tokens
  * macrostructure: Marquee Hero (marketing) / Workbench (app) / Long Document (content)
  * nav: N9 edge-aligned · footer: Ft5 statement · enrichment: filament apparatus (landing only)
- * pre-emit critique: P5 H4 E4 S5 R5 V4
  */
 
 :root {
-  /* paper */
-  --color-paper: oklch(13% 0.014 265);
-  --color-paper-2: oklch(16.5% 0.015 265);
-  --color-paper-3: oklch(20% 0.016 265);
+  /* surfaces */
+  --color-paper: #edf1ef;
+  --color-paper-2: #e4e9e7;
+  --color-paper-3: #dbe2df;
+  --color-card: #f7f9f8;
 
   /* ink */
-  --color-ink: oklch(96% 0.006 262);
-  --color-ink-2: oklch(86% 0.01 262);
-  --color-muted: oklch(64% 0.012 262);
+  --color-ink: #202421;
+  --color-ink-2: #3e4945;
+  --color-muted: #5f6a65;
 
   /* rules */
-  --color-rule: oklch(96% 0.006 262 / 0.08);
-  --color-rule-2: oklch(96% 0.006 262 / 0.14);
-  --rule-blueprint: oklch(96% 0.006 262 / 0.04);
+  --color-rule: #d2dbd7;
+  --color-rule-2: #bbc8c2;
+  --rule-blueprint: #d9e2de;
 
-  /* accents */
-  --color-accent: oklch(76% 0.17 50);
-  --color-accent-ink: oklch(17% 0.03 50);
-  --color-accent-2: oklch(68% 0.16 18);
-  --color-glow: oklch(80% 0.16 50 / 0.42);
-  --color-paper-emit: oklch(76% 0.17 50 / 0.04);
-  --color-focus: oklch(76% 0.17 50);
+  /* restrained brand accent */
+  --color-accent: #dc6c32;
+  --color-accent-ink: #2d160a;
+  --color-accent-2: #b85a27;
+  --color-glow: transparent;
+  --color-paper-emit: rgb(220 108 50 / 0.03);
+  --color-focus: #dc6c32;
 
   /* states */
-  --color-ok: oklch(75% 0.11 150);
-  --color-danger: oklch(66% 0.18 25);
-  --color-warn: oklch(78% 0.14 75);
+  --color-ok: #2e7d52;
+  --color-danger: #b83c3c;
+  --color-warn: #9a5d09;
+  --color-info: #527c78;
 
   /* type */
   --font-display: "Instrument Serif", ui-serif, Georgia, serif;

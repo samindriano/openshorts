@@ -22,9 +22,11 @@ import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
+import AIProviderModal from './components/AIProviderModal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
+import { getProviderAvailability } from './lib/providerAvailability';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -184,6 +186,11 @@ const SESSION_KEY = 'openshorts_session';
 // Matches the self-host JOB_RETENTION_SECONDS default. A restore whose job was
 // already purged server-side fails gracefully and clears the saved session.
 const SESSION_MAX_AGE = 86400000; // 24 hours
+const ANALYSIS_PANE_RATIO_KEY = 'openshorts_analysis_pane_ratio';
+const ANALYSIS_PANE_MIN = 0.42;
+const ANALYSIS_PANE_MAX = 0.72;
+
+const clampAnalysisPaneRatio = (value) => Math.min(ANALYSIS_PANE_MAX, Math.max(ANALYSIS_PANE_MIN, value));
 
 // Mock polling function
 const pollJob = async (jobId) => {
@@ -194,7 +201,17 @@ const pollJob = async (jobId) => {
 
 function App() {
   // Cloud auth/billing session (inert when billing is disabled).
-  const { billingEnabled, isManaged, isSignedIn, me, plan, refreshMe, jobRetentionSeconds } = useAuth();
+  const {
+    billingEnabled,
+    isManaged,
+    isSignedIn,
+    me,
+    plan,
+    refreshMe,
+    jobRetentionSeconds,
+    serverGeminiConfigured,
+    serverOpenaiConfigured,
+  } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
   const [showPlanChoice, setShowPlanChoice] = useState(false);
@@ -205,6 +222,7 @@ function App() {
   const [durableClips, setDurableClips] = useState({});
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [openaiApiKey, setOpenaiApiKey] = useState(localStorage.getItem('openai_key') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -235,12 +253,74 @@ function App() {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
+  const [showProviderModal, setShowProviderModal] = useState(false);
+  const [pendingProcess, setPendingProcess] = useState(null);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
+  // The processing view is intentionally user-adjustable: wide analysis
+  // footage benefits from more room on some screens, while the generated
+  // cards need more room on others. Keep the preference local to this browser.
+  const [analysisPaneRatio, setAnalysisPaneRatio] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ANALYSIS_PANE_RATIO_KEY);
+      const stored = raw == null ? NaN : Number(raw);
+      return Number.isFinite(stored) ? clampAnalysisPaneRatio(stored) : 0.54;
+    } catch (_) {
+      return 0.54;
+    }
+  });
+  const [isResizingAnalysisPane, setIsResizingAnalysisPane] = useState(false);
+  const splitContainerRef = useRef(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(ANALYSIS_PANE_RATIO_KEY, String(analysisPaneRatio)); } catch (_) { /* ignore */ }
+  }, [analysisPaneRatio]);
+
+  useEffect(() => {
+    if (!isResizingAnalysisPane) return undefined;
+
+    const handlePointerMove = (event) => {
+      const container = splitContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      setAnalysisPaneRatio(clampAnalysisPaneRatio((event.clientX - rect.left) / rect.width));
+    };
+    const stopResizing = () => setIsResizingAnalysisPane(false);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+    };
+  }, [isResizingAnalysisPane]);
+
+  const handleAnalysisPanePointerDown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setIsResizingAnalysisPane(true);
+  };
+
+  const handleAnalysisPaneKeyDown = (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+    setAnalysisPaneRatio((current) => clampAnalysisPaneRatio(current + direction * 0.02));
+  };
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
-  const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
+  const [bulkSub, setBulkSub] = useState({ running: false, completed: false, current: 0, total: 0, errors: 0, error: null });
   const [downloadingAll, setDownloadingAll] = useState(false);
   // Pre-flight quality gate: { info: {max_height, min_height, cookies_invalid}, data }
   const [qualityGate, setQualityGate] = useState(null);
@@ -297,6 +377,7 @@ function App() {
       index: Number(i),
       active_layers: v.activeLayers,
       server_file: v.serverVideoFile,
+      subtitle_config: v.subtitleConfig,
     }));
     s.pending = {};
     apiFetch(`/api/projects/${s.jobId}/state`, {
@@ -353,6 +434,42 @@ function App() {
     }
     if (s.timer) clearTimeout(s.timer);
     s.timer = setTimeout(flushClipState, 2000);
+  };
+
+  // Single-card server edits update the card's local player immediately. Keep
+  // the parent result/session in sync too, otherwise a refresh restores the
+  // pre-edit video_url from localStorage even though metadata.json is current.
+  const handleClipVideoUpdated = (index, videoUrl, patch = null) => {
+    if (!videoUrl) return;
+    setResults((prev) => {
+      if (!prev?.clips?.[index]) return prev;
+      const clips = prev.clips.slice();
+      clips[index] = { ...clips[index], video_url: videoUrl, ...(patch || {}) };
+      return { ...prev, clips };
+    });
+    // A server edit creates a new version immediately, while the background
+    // archive may still point at the previous object. Never let the old
+    // durable URL win the race after apply/remove.
+    setDurableClips((prev) => {
+      if (!(index in prev)) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
+    setProjectState((prev) => {
+      if (!prev?.clips) return prev;
+      const hasSubtitleConfig = Object.prototype.hasOwnProperty.call(patch || {}, 'subtitle_config');
+      return {
+        ...prev,
+        clips: prev.clips.map((c) => (c.index === index
+          ? {
+              ...c,
+              server_file: (patch?.server_file || videoUrl).split('/').pop(),
+              ...(hasSubtitleConfig ? { subtitle_config: patch.subtitle_config } : {}),
+            }
+          : c)),
+      };
+    });
   };
 
   // A recut replaced the clip's server file with a fresh render (burned layers
@@ -412,11 +529,12 @@ function App() {
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
     const total = clips.length;
-    if (!total) return;
-    setBulkSub({ running: true, current: 0, total, errors: 0 });
+    if (!total) return { ok: false, error: 'No clips are available for bulk subtitles.' };
+    setBulkSub({ running: true, completed: false, current: 0, total, errors: 0, error: null });
     let errors = 0;
+    let firstError = null;
     for (let i = 0; i < total; i++) {
-      setBulkSub({ running: true, current: i + 1, total, errors });
+      setBulkSub({ running: true, completed: false, current: i + 1, total, errors, error: firstError });
       try {
         const res = await apiFetch('/api/subtitle', {
           method: 'POST',
@@ -433,25 +551,64 @@ function App() {
             bg_color: options.bgColor,
             bg_opacity: options.bgOpacity,
             style: options.style || 'classic',
+            animation: options.animation || 'none',
             highlight_color: options.highlightColor || '#FFD700',
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
             uppercase: options.uppercase || false,
-            // Chain from the clip's current server file (its video_url basename).
-            input_filename: (clips[i].video_url || '').split('/').pop(),
           }),
         });
-        if (!res.ok) errors++;
-      } catch {
+        if (!res.ok) {
+          errors++;
+          const detail = await res.text().catch(() => '');
+          firstError ||= `Clip ${i + 1}: ${detail || `server returned ${res.status}`}`;
+        } else {
+          const data = await res.json().catch(() => null);
+          if (!data?.new_video_url) {
+            errors++;
+            firstError ||= `Clip ${i + 1}: server returned no output file.`;
+          } else {
+            setDurableClips((prev) => {
+              if (!(i in prev)) return prev;
+              const next = { ...prev };
+              delete next[i];
+              return next;
+            });
+            setResults((prev) => {
+              if (!prev?.clips?.[i]) return prev;
+              const nextClips = prev.clips.slice();
+              nextClips[i] = {
+                ...nextClips[i],
+                video_url: data.new_video_url,
+                render_revision: data.revision || null,
+                subtitle_config: data.subtitle_config || null,
+              };
+              return { ...prev, clips: nextClips };
+            });
+          }
+        }
+      } catch (e) {
         errors++;
+        firstError ||= `Clip ${i + 1}: ${e.message || 'request failed'}`;
       }
     }
-    setBulkSub({ running: false, current: total, total, errors });
+    setBulkSub({
+      running: false,
+      completed: true,
+      current: total,
+      total,
+      errors,
+      error: firstError,
+    });
     // Refresh results so each ResultCard picks up its new subtitled video_url.
     try {
       const data = await pollJob(jobId);
       if (data.result) setResults(data.result);
-    } catch { /* keep current results */ }
+    } catch (e) {
+      firstError ||= `Could not refresh the clip list: ${e.message || 'status request failed'}`;
+      setBulkSub((prev) => ({ ...prev, error: firstError }));
+    }
+    return { ok: errors === 0 && !firstError, error: firstError };
   };
 
   const handleDownloadAll = async () => {
@@ -478,6 +635,7 @@ function App() {
 
   // Session Recovery: Restore on mount
   useEffect(() => {
+    let cancelled = false;
     try {
       const saved = localStorage.getItem(SESSION_KEY);
       if (!saved) return;
@@ -499,12 +657,23 @@ function App() {
         if (session.activeTab) setActiveTab(session.activeTab);
         // If was processing, resume polling; if complete/error, just show results
         setStatus(session.status === 'processing' ? 'processing' : session.status);
+        // The saved session can contain a URL for a derived file that was later
+        // replaced or removed. Reconcile completed sessions with the backend so
+        // a reload cannot restore a stale ResultCard source.
+        if (session.status !== 'processing' && session.jobId) {
+          apiJson(`/api/status/${session.jobId}`)
+            .then((data) => {
+              if (!cancelled && data?.result) setResults(data.result);
+            })
+            .catch(() => {});
+        }
         setSessionRecovered(true);
         setTimeout(() => setSessionRecovered(false), 5000);
       }
     } catch (e) {
       localStorage.removeItem(SESSION_KEY);
     }
+    return () => { cancelled = true; };
   }, []);
 
   // Session Recovery: Save state changes
@@ -542,6 +711,10 @@ function App() {
     // For now keeping gemini plain for compatibility unless requested.
     if (apiKey) localStorage.setItem('gemini_key', apiKey);
   }, [apiKey]);
+
+  useEffect(() => {
+    if (openaiApiKey) localStorage.setItem('openai_key', openaiApiKey);
+  }, [openaiApiKey]);
 
   useEffect(() => {
     if (uploadPostKey) {
@@ -673,8 +846,19 @@ function App() {
   };
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  const keysMissing = !billingEnabled && (!apiKey || !uploadPostKey);
+  // Clip generation needs one AI provider key. Upload-Post remains a separate
+  // publishing credential and must not block analysis.
+  const {
+    geminiConfigured,
+    openaiConfigured,
+    keysMissing,
+  } = getProviderAvailability({
+    billingEnabled,
+    browserGeminiKey: apiKey,
+    browserOpenaiKey: openaiApiKey,
+    serverGeminiConfigured,
+    serverOpenaiConfigured,
+  });
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -735,15 +919,7 @@ function App() {
     }
   };
 
-  const handleProcess = async (data, forceLowQuality = false) => {
-    // Hosted: must be signed in AND on an active plan/trial. Self-host: BYOK keys.
-    if (billingEnabled) {
-      if (!isSignedIn) { setShowLogin(true); return; }
-      if (!isManaged) { window.location.hash = '#/pricing'; return; }
-    } else if (keysMissing) {
-      setShowKeyModal(true);
-      return;
-    }
+  const beginProcess = async (data, forceLowQuality, aiProvider) => {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
@@ -756,9 +932,13 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      // Self-host BYOK sends only the selected provider header. Managed users
+      // rely on the bearer token that apiFetch attaches automatically.
+      const headers = {};
+      if (!billingEnabled) {
+        if (aiProvider === 'openai' && openaiApiKey) headers['X-OpenAI-Key'] = openaiApiKey;
+        if (aiProvider === 'gemini' && apiKey) headers['X-Gemini-Key'] = apiKey;
+      }
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -776,6 +956,7 @@ function App() {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           url: data.payload,
+          ai_provider: aiProvider,
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
@@ -787,6 +968,7 @@ function App() {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           thumbnail_session_id: data.payload,
+          ai_provider: aiProvider,
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
@@ -796,6 +978,7 @@ function App() {
         formData.append('file', data.payload);
         formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
         formData.append('output_format', data.outputFormat || 'auto');
+        formData.append('ai_provider', aiProvider);
         for (const [k, v] of Object.entries(advanced)) {
           if (v != null) formData.append(k, v);
         }
@@ -811,7 +994,7 @@ function App() {
       // 20 min on it. On confirm we resend with force_low_quality.
       if (resData.needs_confirmation) {
         setStatus('idle');
-        setQualityGate({ info: resData.quality_check, data });
+        setQualityGate({ info: resData.quality_check, data, aiProvider });
         return;
       }
 
@@ -836,6 +1019,30 @@ function App() {
       setStatus('error');
       setLogs(l => [...l, `Error starting job: ${e.message}`]);
     }
+  };
+
+  const handleProcess = async (data, forceLowQuality = false) => {
+    // Hosted: must be signed in and on an active plan/trial; hosted analysis is
+    // still Gemini-managed. Self-host: choose the provider per job.
+    if (billingEnabled) {
+      if (!isSignedIn) { setShowLogin(true); return; }
+      if (!isManaged) { window.location.hash = '#/pricing'; return; }
+      return beginProcess(data, forceLowQuality, 'gemini');
+    }
+    if (keysMissing) {
+      setShowKeyModal(true);
+      return;
+    }
+    setPendingProcess({ data, forceLowQuality });
+    setShowProviderModal(true);
+  };
+
+  const chooseProvider = (aiProvider) => {
+    if (!pendingProcess) return;
+    const { data, forceLowQuality } = pendingProcess;
+    setPendingProcess(null);
+    setShowProviderModal(false);
+    beginProcess(data, forceLowQuality, aiProvider);
   };
 
   const handleReset = () => {
@@ -871,7 +1078,7 @@ function App() {
           <div className="w-8 h-8 bg-paper3 rounded-input flex items-center justify-center shrink-0 overflow-hidden border border-rule">
             <img src="/logo-openshorts.png" alt="Logo" className="w-full h-full object-cover" />
           </div>
-          <span className="font-display lowercase text-lg text-ink hidden lg:block">openshorts</span>
+          <span className="font-display text-lg text-ink hidden lg:block">OpenShorts</span>
         </a>
 
         <nav className="flex-1 px-4 py-4 space-y-1">
@@ -888,7 +1095,7 @@ function App() {
                   <span className="absolute left-0 top-1.5 bottom-1.5 w-0.5 bg-brass rounded-full" aria-hidden="true" />
                 )}
                 <NavIcon size={18} className={`shrink-0 ${isActive ? 'text-brass' : ''}`} />
-                <span className="text-sm lowercase hidden lg:block flex-1 text-left truncate">{item.label}</span>
+                <span className="text-sm hidden lg:block flex-1 text-left truncate">{item.label}</span>
                 {item.byok && <span className="readout hidden lg:block">BYOK</span>}
                 <span className="readout hidden lg:block">{item.ord}</span>
               </button>
@@ -899,32 +1106,32 @@ function App() {
         <div className="p-4 border-t border-rule space-y-1">
           <a
             href="#landing"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <Globe size={14} className="shrink-0" />
-            <span className="hidden lg:block truncate">landing page</span>
+            <span className="hidden lg:block truncate">Landing Page</span>
           </a>
           <a
             href="https://github.com/mutonby/openshorts"
             target="_blank"
             rel="noopener noreferrer"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <svg height="14" viewBox="0 0 16 16" version="1.1" width="14" aria-hidden="true" fill="currentColor" className="shrink-0"><path fillRule="evenodd" d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"></path></svg>
-            <span className="hidden lg:block truncate">open source</span>
+            <span className="hidden lg:block truncate">Open Source</span>
           </a>
           {billingEnabled && (
             <a
               href="#/pricing"
-              className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+              className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
             >
               <Sparkles size={14} className="shrink-0" />
-              <span className="hidden lg:block truncate">plans &amp; pricing</span>
+              <span className="hidden lg:block truncate">Plans &amp; Pricing</span>
             </a>
           )}
           <a
             href="mailto:info@openshorts.app"
-            className="flex items-center gap-2 px-3 py-1.5 text-xs lowercase text-muted hover:text-ink2 transition-colors"
+            className="flex items-center gap-2 px-3 py-1.5 text-xs text-muted hover:text-ink2 transition-colors"
           >
             <Mail size={14} className="shrink-0" />
             <span className="hidden lg:block truncate">info@openshorts.app</span>
@@ -994,11 +1201,9 @@ function App() {
               >
                 <AlertTriangle size={12} />
                 <span className="hidden sm:inline">
-                  {!apiKey && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !apiKey
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
+                    {!geminiConfigured && !openaiConfigured
+                     ? 'AI provider keys missing'
+                     : 'AI provider key missing'}
                 </span>
                 <span className="sm:hidden">keys missing</span>
               </button>
@@ -1014,11 +1219,9 @@ function App() {
               <div>
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
-                  {!apiKey && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !apiKey
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
+                  {!geminiConfigured && !openaiConfigured
+                    ? 'Set a Gemini or OpenAI key to generate clips.'
+                    : 'Set an AI provider key to generate clips.'}
                 </span>
               </div>
             </div>
@@ -1060,10 +1263,12 @@ function App() {
               <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-4 mb-8">
                 <div>
                   <p className="eyebrow mb-1.5">07 · SETTINGS</p>
-                  <h1 className="font-display lowercase text-2xl text-ink">Settings</h1>
+                  <h1 className="font-display text-2xl text-ink">Settings</h1>
                 </div>
                 <div className="flex items-center gap-2 text-xs text-muted mt-1">
-                  <Shield size={12} className="text-ok shrink-0" /> Privacy: keys only live in your browser (sent to backend just to process)
+                  <Shield size={12} className="text-ok shrink-0" /> {serverGeminiConfigured || serverOpenaiConfigured
+                    ? 'Privacy: server provider keys stay on the server; browser overrides are sent only for that job'
+                    : 'Privacy: keys only live in your browser (sent to backend just to process)'}
                 </div>
               </div>
               {isManaged ? (
@@ -1073,7 +1278,7 @@ function App() {
                       <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                         <Shield size={16} className="text-brass" />
                       </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Included in your plan</h2>
+                      <h2 className="text-base font-medium text-ink">Included in your plan</h2>
                     </div>
                     <span className="badge-ok">Managed</span>
                   </div>
@@ -1098,7 +1303,7 @@ function App() {
                       <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                         <Sparkles size={16} className="text-brass" />
                       </div>
-                      <h2 className="text-base font-medium text-ink lowercase">Choose your plan</h2>
+                      <h2 className="text-base font-medium text-ink">Choose your plan</h2>
                     </div>
                     <span className="badge-ok">Free plan available</span>
                   </div>
@@ -1111,7 +1316,21 @@ function App() {
                 </div>
               ) : (
                 <>
-              <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <p className="eyebrow mb-4">AI PROVIDERS</p>
+              <KeyInput
+                onKeySet={setApiKey}
+                savedKey={apiKey}
+                serverConfigured={serverGeminiConfigured}
+              />
+              <KeyInput
+                onKeySet={setOpenaiApiKey}
+                savedKey={openaiApiKey}
+                title="OpenAI API Key"
+                placeholder="sk-..."
+                helpHref="https://platform.openai.com/api-keys"
+                helpText="Get your OpenAI API key here →"
+                serverConfigured={serverOpenaiConfigured}
+              />
 
               <div className="card p-4 sm:p-6 mt-8">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -1119,7 +1338,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Share2 size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Social Integration</h2>
+                    <h2 className="text-base font-medium text-ink">Social Integration</h2>
                   </div>
                   <span className="badge-warn">Required</span>
                 </div>
@@ -1174,7 +1393,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Globe size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">Video Translation</h2>
+                    <h2 className="text-base font-medium text-ink">Video Translation</h2>
                   </div>
                   <span className="readout">BYOK</span>
                 </div>
@@ -1231,7 +1450,7 @@ function App() {
                     <div className="w-9 h-9 rounded-input bg-paper3 flex items-center justify-center shrink-0">
                       <Sparkles size={16} className="text-brass" />
                     </div>
-                    <h2 className="text-base font-medium text-ink lowercase">AI Shorts (UGC Videos)</h2>
+                    <h2 className="text-base font-medium text-ink">AI Shorts (UGC Videos)</h2>
                   </div>
                   <span className="readout">BYOK</span>
                 </div>
@@ -1300,7 +1519,7 @@ function App() {
                   <p className="eyebrow flex items-center gap-2">
                     <Bot size={12} /> 03 · AI AGENT · AUTONOMOUS SKILL
                   </p>
-                  <h1 className="font-display lowercase text-3xl md:text-4xl text-ink">
+                  <h1 className="font-display text-3xl md:text-4xl text-ink">
                     Your Personal Clipping Team
                   </h1>
                   <p className="text-muted text-base md:text-lg leading-relaxed max-w-2xl">
@@ -1325,7 +1544,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Upload size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">1. Drop your videos</h3>
+                    <h3 className="font-medium text-ink">1. Drop Your Videos</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Put your long-form vertical footage in the watched folder. The skill picks one video per run.
                     </p>
@@ -1335,7 +1554,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <Users size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">2. AI clippers work</h3>
+                    <h3 className="font-medium text-ink">2. AI Clippers Work</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Whisper transcribes, Gemini 3 Flash spots viral beats, FFmpeg cuts each clip and adds a hook overlay.
                     </p>
@@ -1345,7 +1564,7 @@ function App() {
                     <div className="w-10 h-10 rounded-input bg-paper3 flex items-center justify-center">
                       <CheckCircle2 size={18} className="text-brass" />
                     </div>
-                    <h3 className="font-medium text-ink lowercase">3. You validate, it ships</h3>
+                    <h3 className="font-medium text-ink">3. You Validate, It Ships</h3>
                     <p className="text-xs text-muted leading-relaxed">
                       Approve the candidates you like and the skill auto-publishes them to TikTok, Reels and YouTube Shorts via Upload-Post.
                     </p>
@@ -1356,7 +1575,7 @@ function App() {
                 <div className="card p-6 md:p-8 space-y-5">
                   <div className="flex items-start justify-between gap-4 flex-wrap">
                     <div>
-                      <h2 className="font-display lowercase text-xl text-ink mb-1">skill-autoshorts</h2>
+                      <h2 className="font-display text-xl text-ink mb-1">Skill-AutoShorts</h2>
                       <p className="text-sm text-muted">
                         The Claude Code skill that powers this workflow. Install it once and trigger it whenever you want a fresh batch of clips.
                       </p>
@@ -1451,7 +1670,7 @@ function App() {
               <div className="max-w-xl w-full text-center space-y-8">
                 <div className="space-y-4">
                   <p className="eyebrow">01 · CLIP GENERATOR</p>
-                  <h1 className="font-display lowercase text-4xl md:text-5xl text-ink">
+                  <h1 className="font-display text-4xl md:text-5xl text-ink">
                     Create Viral Shorts
                   </h1>
                   <p className="text-muted text-lg">
@@ -1473,12 +1692,18 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row gap-4 p-4 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
+            <div
+              ref={status === 'processing' ? splitContainerRef : null}
+              className={`h-full flex flex-col gap-6 md:gap-0 p-5 sm:p-6 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade ${status === 'processing' ? 'md:grid' : 'md:flex-row'}`}
+              style={status === 'processing' ? {
+                gridTemplateColumns: `minmax(0, ${analysisPaneRatio}fr) 20px minmax(0, ${1 - analysisPaneRatio}fr)`,
+              } : undefined}
+            >
 
               {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
-                <div className="mb-6 flex items-center justify-between">
-                  <h2 className="text-sm font-medium text-ink lowercase flex items-center gap-2">
+              <div className={`${status === 'processing' ? 'w-full' : status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+                <div className="mb-7 flex items-center justify-between">
+                  <h2 className="text-base font-semibold text-ink flex items-center gap-2">
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
                     Live Analysis
                   </h2>
@@ -1535,18 +1760,44 @@ function App() {
                 </div>
               </div>
 
+              {status === 'processing' && (
+                <div
+                  role="separator"
+                  tabIndex={0}
+                  aria-orientation="vertical"
+                  aria-label="Resize Live Analysis and Generated Shorts panels"
+                  aria-valuemin={Math.round(ANALYSIS_PANE_MIN * 100)}
+                  aria-valuemax={Math.round(ANALYSIS_PANE_MAX * 100)}
+                  aria-valuenow={Math.round(analysisPaneRatio * 100)}
+                  onPointerDown={handleAnalysisPanePointerDown}
+                  onKeyDown={handleAnalysisPaneKeyDown}
+                  className="hidden md:flex w-5 h-full items-center justify-center cursor-col-resize touch-none group/resize"
+                >
+                  <span className="w-1 h-16 rounded-full bg-rule2 group-hover/resize:bg-brass group-focus/resize:bg-brass transition-colors" />
+                </div>
+              )}
+
               {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-4 sm:p-6 transition-all duration-700 ease-in-out`}>
-                <h2 className="font-display lowercase text-xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
+              <div className={`${status === 'processing' ? 'w-full' : status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 transition-all duration-700 ease-in-out`}>
+                <h2 className="font-display text-2xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
                   Generated Shorts
                   {results?.clips?.length > 0 && (
                     <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-auto">
                       {results.clips.length} Clips
                     </span>
                   )}
-                  {results?.cost_analysis && !isManaged && (
-                    <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      GEMINI · ${results.cost_analysis.total_cost.toFixed(5)}
+                  {(results?.ai_provider || results?.cost_analysis?.provider) && (
+                    <span
+                      className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2"
+                      title={results.cost_analysis
+                        ? `Input: ${results.cost_analysis.input_tokens ?? 'unknown'} | Output: ${results.cost_analysis.output_tokens ?? 'unknown'}`
+                        : 'Provider usage was not returned'}
+                    >
+                      {(results.ai_provider || results.cost_analysis.provider).toUpperCase()}
+                      {` · ${results.ai_model || results.cost_analysis.model || 'model unknown'}`}
+                      {Number.isFinite(results.cost_analysis?.total_cost)
+                        ? ` · $${results.cost_analysis.total_cost.toFixed(5)}`
+                        : ' · cost unknown'}
                     </span>
                   )}
                   {results?.clips?.length > 0 && status === 'complete' && (
@@ -1558,8 +1809,8 @@ function App() {
                         title="Download all clips as a ZIP"
                       >
                         {downloadingAll
-                          ? <><Loader2 size={14} className="animate-spin" />zipping…</>
-                          : <><Download size={14} />download all</>}
+                          ? <><Loader2 size={14} className="animate-spin" />Zipping…</>
+                          : <><Download size={14} />Download All</>}
                       </button>
                       {results.clips.length > 1 && (
                         <button
@@ -1567,7 +1818,7 @@ function App() {
                           className="btn-primary px-4 py-2 text-xs"
                         >
                           <Calendar size={14} />
-                          schedule week
+                          Schedule Week
                         </button>
                       )}
                     </div>
@@ -1599,9 +1850,9 @@ function App() {
                         </div>
                         <button
                           onClick={() => { track('SocialNudgeConnect'); handleConnectSocials(); }}
-                          className="btn-quiet shrink-0 text-xs py-1.5 px-3 lowercase"
+                          className="btn-quiet shrink-0 text-xs py-1.5 px-3"
                         >
-                          connect socials →
+                          Connect Socials →
                         </button>
                         <button
                           onClick={() => {
@@ -1629,7 +1880,7 @@ function App() {
 
                 <div className="flex-1 overflow-y-auto custom-scrollbar p-1">
                   {results && results.clips && results.clips.length > 0 ? (
-                    <div className={`grid gap-4 pb-10 ${status === 'complete' ? 'grid-cols-1 xl:grid-cols-2' : 'grid-cols-1'}`}>
+                    <div className="grid grid-cols-1 gap-5 pb-10">
                       {results.clips.map((clip, i) => (
                         <ResultCard
                           key={`${jobId}-${i}-${clip.video_url || ''}`}
@@ -1640,6 +1891,7 @@ function App() {
                           onReframeClip={(index) => setReframingClip(index)}
                           initialState={projectState?.clips?.find((c) => c.index === i) || null}
                           onStateChange={handleClipStateChange}
+                          onVideoUpdated={handleClipVideoUpdated}
                           durable={durableClips[i]}
                           uploadPostKey={uploadPostKey}
                           uploadUserId={uploadUserId}
@@ -1660,7 +1912,7 @@ function App() {
                     status === 'processing' ? (
                       <div className="h-full flex flex-col items-center justify-center text-muted space-y-4">
                         <Loader2 size={32} className="animate-spin text-brass" />
-                        <p className="text-sm lowercase">Waiting for clips...</p>
+                        <p className="text-sm">Waiting for Clips...</p>
                       </div>
                     ) : status === 'error' ? (
                       <div className="h-full flex flex-col items-center justify-center text-danger space-y-2">
@@ -1678,16 +1930,34 @@ function App() {
 
       </main>
 
+      <AIProviderModal
+        isOpen={showProviderModal}
+        onClose={() => {
+          setShowProviderModal(false);
+          setPendingProcess(null);
+        }}
+        onChoose={chooseProvider}
+        onOpenSettings={() => {
+          setShowProviderModal(false);
+          setPendingProcess(null);
+          setActiveTab('settings');
+        }}
+        geminiConfigured={geminiConfigured}
+        openaiConfigured={openaiConfigured}
+        geminiServerConfigured={serverGeminiConfigured}
+        openaiServerConfigured={serverOpenaiConfigured}
+      />
+
       {/* Missing API Key Modal */}
       <Modal
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!apiKey && !uploadPostKey
-          ? 'Required API Keys Missing'
-          : !apiKey
+        title={!geminiConfigured && !openaiConfigured
+          ? 'AI Provider Key Required'
+          : !geminiConfigured
             ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+            : 'OpenAI API Key Required'}
         footer={
           <div className="flex gap-3">
             <button
@@ -1707,16 +1977,16 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            OpenShorts needs one AI provider key to generate clips. Add Gemini or OpenAI in Settings, then choose the provider for each job.
           </p>
 
           {/* Gemini block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!apiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          <div className={`rounded-input p-4 space-y-2 border ${!geminiConfigured ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {apiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Gemini API Key {apiKey && <span className="text-ok">— set</span>}
+              {geminiConfigured ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              Gemini API Key {geminiConfigured && <span className="text-ok">— {serverGeminiConfigured && !apiKey ? 'configured on server' : 'set'}</span>}
             </p>
-            {!apiKey && (
+            {!geminiConfigured && (
               <>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
                   <li>Go to <a href="https://aistudio.google.com/app/apikey" target="_blank" rel="noopener noreferrer" className="text-brass underline">aistudio.google.com/app/apikey</a></li>
@@ -1738,30 +2008,26 @@ function App() {
             )}
           </div>
 
-          {/* Upload-Post block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          {/* OpenAI block */}
+          <div className={`rounded-input p-4 space-y-2 border ${!openaiConfigured ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
+              {openaiConfigured ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              OpenAI API Key {openaiConfigured && <span className="text-ok">— {serverOpenaiConfigured && !openaiApiKey ? 'configured on server' : 'set'}</span>}
             </p>
-            {!uploadPostKey && (
+            {!openaiConfigured && (
               <>
-                <p className="text-xs text-muted">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts. Free tier available, no credit card needed.
-                </p>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Register at <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="text-brass underline">app.upload-post.com</a></li>
-                  <li>Connect your TikTok, Instagram, or YouTube accounts</li>
-                  <li>Go to <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">API Keys</a> and generate one</li>
+                  <li>Go to <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">platform.openai.com/api-keys</a></li>
+                  <li>Create or copy an API key</li>
                   <li>Paste it below</li>
                 </ol>
                 <input
                   type="text"
-                  placeholder="Paste your Upload-Post API key here..."
+                  placeholder="Paste your OpenAI API key here..."
                   className="input-field"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && e.target.value.trim()) {
-                      setUploadPostKey(e.target.value.trim());
+                      setOpenaiApiKey(e.target.value.trim());
                     }
                   }}
                 />
@@ -1797,7 +2063,11 @@ function App() {
             <div className="flex gap-2 justify-end pt-2">
               <button onClick={() => setQualityGate(null)} className="btn-ghost">cancel</button>
               <button
-                onClick={() => { const d = qualityGate.data; setQualityGate(null); handleProcess(d, true); }}
+                onClick={() => {
+                  const gate = qualityGate;
+                  setQualityGate(null);
+                  beginProcess(gate.data, true, gate.aiProvider || 'gemini');
+                }}
                 className="btn-primary"
               >
                 process anyway

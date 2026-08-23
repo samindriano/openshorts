@@ -10,13 +10,14 @@ import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
+import { cacheBustVideoUrl, filenameFromVideoUrl, selectPlaybackUrl } from '../lib/videoSource';
 
-const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
+const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1.5 py-2.5 px-2 rounded-input border border-rule hover:bg-paper3 text-xs font-medium text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
 const PLATFORM_OPTIONS = [
-    { value: 'tiktok', label: 'tiktok', icon: <Video size={16} /> },
-    { value: 'instagram', label: 'instagram', icon: <Instagram size={16} /> },
-    { value: 'youtube', label: 'youtube', icon: <Youtube size={16} /> },
+    { value: 'tiktok', label: 'TikTok', icon: <Video size={16} /> },
+    { value: 'instagram', label: 'Instagram', icon: <Instagram size={16} /> },
+    { value: 'youtube', label: 'YouTube', icon: <Youtube size={16} /> },
 ];
 
 function clipDurationSeconds(clip) {
@@ -35,7 +36,7 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -51,8 +52,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
         return f;
     };
-    const originalVideoUrl = getApiUrl((clip.video_url || '').replace(/[^/]+$/, stripBurns((clip.video_url || '').split('/').pop())));
-    const [currentVideoUrl, setCurrentVideoUrl] = useState(getApiUrl(clip.video_url));
+    const [currentVideoUrl, setCurrentVideoUrl] = useState(
+        cacheBustVideoUrl(getApiUrl(clip.video_url), clip.render_revision)
+    );
     // Where the <video> element pulls its bytes from. The clips are archived to
     // R2 anyway, and R2 egress is free and edge-served, while /videos is served
     // by the same single-worker API process that is running the renders. So play
@@ -99,7 +101,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // All server-side operations must chain from this, so burned-in edits
     // (subtitles, hooks, effects) never get silently dropped.
     // A reopened project seeds it from the persisted project state.
-    const [serverVideoFile, setServerVideoFile] = useState(initialState?.server_file || (clip.video_url || '').split('/').pop());
+    const [serverVideoFile, setServerVideoFile] = useState(
+        initialState?.server_file || filenameFromVideoUrl(clip.video_url)
+    );
+    const [subtitleConfig, setSubtitleConfig] = useState(
+        clip.subtitle_config || initialState?.subtitle_config || null
+    );
+    // Always preview/composite from the clean file for the CURRENT cut. The
+    // old implementation froze this to the first clip.video_url, so a recut or
+    // edit could make the modal preview/render fall back to an older cut.
+    const currentBaseVideoUrl = getApiUrl(
+        `/videos/${jobId}/${stripBurns(serverVideoFile)}`
+    );
     const [videoErrored, setVideoErrored] = useState(false);
     const [resolution, setResolution] = useState(null);
 
@@ -130,11 +143,13 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // subtitles applied from another card), adopt it so the card shows the
     // freshly subtitled video instead of a stale one.
     useEffect(() => {
-        const serverUrl = getApiUrl(clip.video_url);
-        const serverName = (clip.video_url || '').split('/').pop();
+        const serverUrl = cacheBustVideoUrl(getApiUrl(clip.video_url), clip.render_revision);
+        const serverName = filenameFromVideoUrl(clip.video_url);
         if (serverName && serverName !== serverVideoFile) {
             setServerVideoFile(serverName);
             setCurrentVideoUrl(serverUrl);
+            setSubtitleConfig(clip.subtitle_config || null);
+            setDurableSrc(null);
             setDurableFailed(false);
             setHasPlayed(false);
             if (videoRef.current) videoRef.current.load();
@@ -189,9 +204,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const stateReported = React.useRef(false);
     useEffect(() => {
         if (!stateReported.current) { stateReported.current = true; return; }
-        onStateChange?.(index, { activeLayers, serverVideoFile });
+        onStateChange?.(index, { activeLayers, serverVideoFile, subtitleConfig });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeLayers, serverVideoFile]);
+    }, [activeLayers, serverVideoFile, subtitleConfig]);
 
     // True when the current server file already carries burned-in content.
     // Browser (Remotion) renders compose over the ORIGINAL clip, so using them
@@ -202,6 +217,34 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // one). /api/hook REPLACES it; tracked locally so the modal stays honest
     // after edits without refetching the job.
     const [burnedHook, setBurnedHook] = useState(clip.auto_hook?.text || null);
+    const hookText = burnedHook || clip.auto_hook?.text || clip.viral_hook_text || null;
+
+    // Adopt a server render as one atomic client-side version. Clear the
+    // durable fallback first: its signed URL may still point at the previous
+    // archived file while the new render is being re-archived. The filename is
+    // already unique, and the revision query also prevents a cached response
+    // from winning when a clean file is reused after subtitle removal.
+    const adoptServerVideo = (data, patch = {}) => {
+        const nextFile = data.server_file || filenameFromVideoUrl(data.new_video_url);
+        const nextUrl = cacheBustVideoUrl(getApiUrl(data.new_video_url), data.revision);
+        setServerVideoFile(nextFile);
+        setCurrentVideoUrl(nextUrl);
+        setDurableSrc(null);
+        setDurableFailed(false);
+        setVideoErrored(false);
+        setHasPlayed(false);
+        if (Object.prototype.hasOwnProperty.call(data, 'subtitle_config')) {
+            setSubtitleConfig(data.subtitle_config);
+        }
+        onVideoUpdated?.(index, data.new_video_url, {
+            render_revision: data.revision || null,
+            ...(Object.prototype.hasOwnProperty.call(data, 'subtitle_config')
+                ? { subtitle_config: data.subtitle_config }
+                : {}),
+            ...patch,
+        });
+        return nextUrl;
+    };
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -253,11 +296,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         try {
             const apiKey = geminiApiKey || localStorage.getItem('gemini_key');
 
-            // Managed (paid) users get the Gemini key resolved server-side;
-            // only BYOK/self-host needs a local key.
-            if (!apiKey && !isManaged) {
-                throw new Error("Gemini API Key is missing. Please set it in Settings.");
-            }
+            // Managed users and self-hosted instances with GEMINI_API_KEY in
+            // the backend .env both resolve the key server-side. A browser key
+            // is still accepted when present, but must not be required here:
+            // otherwise self-host users are blocked before /api/edit can use
+            // their server-side configuration.
             const geminiHeaders = apiKey ? { 'X-Gemini-Key': apiKey } : {};
 
             // Try Remotion effects endpoint first
@@ -280,7 +323,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     const newLayers = { ...activeLayers, effects: data.effects };
                     setActiveLayers(newLayers);
                     const blobUrl = await renderInBrowser({
-                        videoUrl: originalVideoUrl,
+                        videoUrl: currentBaseVideoUrl,
                         durationInSeconds: clipDuration,
                         subtitles: newLayers.subtitles,
                         hook: newLayers.hook,
@@ -320,6 +363,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -349,25 +393,23 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
-            if (data.new_video_url) {
-                const serverUrl = getApiUrl(data.new_video_url);
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                const remaining = { ...activeLayers, subtitles: null };
-                setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
-                    setCurrentVideoUrl(await renderInBrowser({
-                        videoUrl: serverUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
-                    }));
-                } else {
-                    setCurrentVideoUrl(serverUrl);
-                }
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
+            if (!data.new_video_url) throw new Error('Subtitle server returned no output file.');
+            const serverUrl = adoptServerVideo(data);
+            const remaining = { ...activeLayers, subtitles: null };
+            setActiveLayers(remaining);
+            if (remaining.hook || remaining.effects) {
+                setCurrentVideoUrl(await renderInBrowser({
+                    videoUrl: serverUrl,
+                    durationInSeconds: clipDuration,
+                    subtitles: null,
+                    hook: remaining.hook,
+                    effects: remaining.effects,
+                }));
+            } else {
+                setCurrentVideoUrl(serverUrl);
             }
+            if (videoRef.current) videoRef.current.load();
+            setShowSubtitleModal(false);
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
@@ -380,27 +422,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsSubtitling(true);
         setEditError(null);
         try {
-            // Karaoke styles are burned server-side (ASS word-highlight render);
-            // the in-browser Remotion path only handles classic styles, and only
-            // when the server file has no burned-in content to preserve.
-            if (options.remotion && options.style !== 'karaoke' && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, subtitles: options.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
+            // Subtitle edits must be durable: the Remotion preview is useful
+            // while choosing a style, but a browser blob cannot be recovered by
+            // refresh and is not the server file used for download/publishing.
             const res = await apiFetch('/api/subtitle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
@@ -416,6 +440,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     bg_color: options.bgColor,
                     bg_opacity: options.bgOpacity,
                     style: options.style || 'classic',
+                    animation: options.animation || 'none',
                     highlight_color: options.highlightColor || '#FFD700',
                     effect: options.effect || 'none',
                     base_opacity: options.baseOpacity ?? 1.0,
@@ -429,29 +454,29 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
-            if (data.new_video_url) {
-                const serverUrl = getApiUrl(data.new_video_url);
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                // Subtitles are burned into the server file now — drop the
-                // browser subtitle layer and re-compose any remaining browser
-                // layers (hook/effects) over the new file so they aren't lost.
-                const remaining = { ...activeLayers, subtitles: null };
-                setActiveLayers(remaining);
-                if (remaining.hook || remaining.effects) {
-                    const blobUrl = await renderInBrowser({
-                        videoUrl: serverUrl,
-                        durationInSeconds: clipDuration,
-                        subtitles: null,
-                        hook: remaining.hook,
-                        effects: remaining.effects,
-                    });
-                    setCurrentVideoUrl(blobUrl);
-                } else {
-                    setCurrentVideoUrl(serverUrl);
-                }
-                if (videoRef.current) videoRef.current.load();
-                setShowSubtitleModal(false);
+            if (!data.new_video_url) {
+                throw new Error('Subtitle server returned no output file.');
             }
+            const serverUrl = adoptServerVideo(data);
+            // Subtitles are burned into the server file now — drop the
+            // browser subtitle layer and re-compose any remaining browser
+            // layers (hook/effects) over the new file so they aren't lost.
+            const remaining = { ...activeLayers, subtitles: null };
+            setActiveLayers(remaining);
+            if (remaining.hook || remaining.effects) {
+                const blobUrl = await renderInBrowser({
+                    videoUrl: serverUrl,
+                    durationInSeconds: clipDuration,
+                    subtitles: null,
+                    hook: remaining.hook,
+                    effects: remaining.effects,
+                });
+                setCurrentVideoUrl(blobUrl);
+            } else {
+                setCurrentVideoUrl(serverUrl);
+            }
+            if (videoRef.current) videoRef.current.load();
+            setShowSubtitleModal(false);
         } catch (e) {
             setEditError(e.message);
             setTimeout(() => setEditError(null), 5000);
@@ -464,24 +489,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setIsHooking(true);
         setEditError(null);
         try {
-            if (hookData.remotion && !hasServerBurns) {
-                // Accumulate layer and render all layers together
-                const newLayers = { ...activeLayers, hook: hookData.remotion };
-                setActiveLayers(newLayers);
-                const blobUrl = await renderInBrowser({
-                    videoUrl: originalVideoUrl,
-                    durationInSeconds: clipDuration,
-                    subtitles: newLayers.subtitles,
-                    hook: newLayers.hook,
-                    effects: newLayers.effects,
-                });
-                setCurrentVideoUrl(blobUrl);
-                if (videoRef.current) videoRef.current.load();
-                setShowHookModal(false);
-                return;
-            }
-
-            // Fallback: legacy FFmpeg
+            // Hook edits are intentionally server-backed. A browser-only
+            // Remotion blob cannot be recovered after refresh or downloaded as
+            // the job's current output, so every save gets a durable version.
             const payload = typeof hookData === 'string'
                 ? { text: hookData, position: 'top', size: 'M' }
                 : hookData;
@@ -496,7 +506,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     position: payload.position,
                     size: payload.size,
                     style: payload.style || 'classic',
-                    duration_seconds: payload.remotion?.displayDurationSec ?? null,
+                    duration_seconds: payload.remotion?.displayDurationSec ?? payload.duration_seconds ?? null,
                     input_filename: serverVideoFile
                 })
             });
@@ -504,9 +514,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
+                const serverUrl = getApiUrl(data.new_video_url);
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url, { auto_hook: data.burned_hook || null });
                 setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
+                // Keep any existing browser-only subtitle/effect layers visible
+                // over the newly durable hook without burning the hook twice.
+                const remaining = { ...activeLayers, hook: null };
+                setActiveLayers(remaining);
+                if (remaining.subtitles || remaining.effects) {
+                    setCurrentVideoUrl(await renderInBrowser({
+                        videoUrl: serverUrl,
+                        durationInSeconds: clipDuration,
+                        subtitles: remaining.subtitles,
+                        hook: null,
+                        effects: remaining.effects,
+                    }));
+                } else {
+                    setCurrentVideoUrl(serverUrl);
+                }
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
             }
@@ -532,12 +558,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     remove: true,
                     input_filename: serverVideoFile,
                 }),
-            });
+                });
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url, { auto_hook: null });
+                setActiveLayers({ ...activeLayers, hook: null });
                 setBurnedHook(null);
                 if (videoRef.current) videoRef.current.load();
                 setShowHookModal(false);
@@ -599,6 +627,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (data.new_video_url) {
                 setCurrentVideoUrl(getApiUrl(data.new_video_url));
                 setServerVideoFile(data.new_video_url.split('/').pop());
+                onVideoUpdated?.(index, data.new_video_url);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -691,17 +720,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     // Browser-rendered previews (Remotion) live in a blob: URL that exists only
     // in this tab, so they always win over the durable copy.
-    const playbackUrl = (durableSrc && !durableFailed && !String(currentVideoUrl || '').startsWith('blob:'))
-        ? durableSrc
-        : currentVideoUrl;
+    const playbackUrl = selectPlaybackUrl({ durableSrc, durableFailed, currentVideoUrl });
 
     const durationReadout = formatDuration(clip);
 
     return (
-        <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[420px]" style={{ animationDelay: `${index * 0.1}s` }}>
+        <div className="card overflow-hidden flex flex-col md:flex-row group hover:border-rule2 transition-colors animate-fade md:min-h-[480px]" style={{ animationDelay: `${index * 0.1}s` }}>
             {/* Left: Video Preview — 9:16 column matching the fixed card height */}
-            <div className="w-full md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
+            <div className="w-full md:w-[260px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
+                    key={playbackUrl}
                     ref={videoRef}
                     src={playbackUrl}
                     controls
@@ -747,16 +775,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {isEditing && (
                     <div className="absolute inset-0 bg-black/70 flex flex-col items-center justify-center z-10 p-4 text-center">
                         <Loader2 size={28} className="text-brass animate-spin mb-3" />
-                        <span className="text-xs text-ink lowercase">ai magic in progress…</span>
+                        <span className="text-sm text-ink font-medium">AI Magic in Progress…</span>
                         <span className="readout mt-1.5">APPLYING VIRAL EDITS · ZOOMS</span>
                     </div>
                 )}
             </div>
 
             {/* Right: Content & Details */}
-            <div className="flex-1 p-4 md:p-5 flex flex-col overflow-hidden min-w-0">
+            <div className="flex-1 p-5 md:p-6 flex flex-col overflow-hidden min-w-0">
                 <div className="mb-4">
-                    <h3 className="text-base font-medium text-ink leading-tight line-clamp-2 mb-2 break-words" title={clip.video_title_for_youtube_short}>
+                    <h3 className="text-lg font-semibold text-ink leading-tight line-clamp-2 mb-2.5 break-words" title={clip.video_title_for_youtube_short}>
                         {clip.video_title_for_youtube_short || "Viral Clip Generated"}
                     </h3>
                     <div className="flex flex-wrap gap-1.5">
@@ -767,11 +795,26 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     </div>
                 </div>
 
+                {hookText && (
+                    <div className="mb-3 bg-paper rounded-input px-3 py-2 border border-rule flex items-start gap-2 min-w-0">
+                        <span className="eyebrow shrink-0 pt-0.5">HOOK</span>
+                        <p className="text-xs text-ink2 line-clamp-2 flex-1 min-w-0" title={hookText}>
+                            {hookText}
+                        </p>
+                        <button
+                            onClick={() => setShowHookModal(true)}
+                            className="text-[11px] lowercase text-muted hover:text-brass transition-colors shrink-0"
+                        >
+                            edit
+                        </button>
+                    </div>
+                )}
+
                 {/* Descriptions (compact) — full text lives in the modal */}
                 <div className="flex-1 min-h-0 space-y-2 mb-4">
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0">
                         <span className="eyebrow shrink-0">YOUTUBE</span>
-                        <p className="text-xs text-ink2 truncate flex-1 min-w-0">
+                        <p className="text-sm text-ink2 truncate flex-1 min-w-0">
                             {clip.video_title_for_youtube_short || "Viral Short Video"}
                         </p>
                         <button
@@ -785,7 +828,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
                     <div className="bg-paper rounded-input px-3 py-2 border border-rule flex items-center gap-2 min-w-0">
                         <span className="eyebrow shrink-0">TIKTOK · IG</span>
-                        <p className="text-xs text-ink2 truncate flex-1 min-w-0">
+                        <p className="text-sm text-ink2 truncate flex-1 min-w-0">
                             {clip.video_description_for_tiktok || clip.video_description_for_instagram}
                         </p>
                         <button
@@ -799,9 +842,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
                     <button
                         onClick={() => setShowDescModal(true)}
-                        className="w-full flex items-center justify-center gap-2 py-2 rounded-input border border-dashed border-rule text-xs lowercase text-muted hover:text-brass hover:border-rule2 transition-colors"
+                        className="w-full flex items-center justify-center gap-2 py-2.5 rounded-input border border-dashed border-rule text-sm text-muted hover:text-brass hover:border-rule2 transition-colors"
                     >
-                        <FileText size={14} /> view descriptions
+                        <FileText size={14} /> View Descriptions
                     </button>
                 </div>
 
@@ -821,7 +864,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             className={QUIET_BTN}
                         >
                             <Scissors size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
-                            edit clip
+                            Edit Clip
                         </button>
                     )}
 
@@ -831,7 +874,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             className={QUIET_BTN}
                         >
                             <Crosshair size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />
-                            reframing
+                            Reframing
                         </button>
                     )}
 
@@ -841,7 +884,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isEditing ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isEditing ? 'editing…' : 'auto edit'}
+                        {isEditing ? 'Editing…' : 'Auto Edit'}
                     </button>
 
                     <button
@@ -850,7 +893,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isSubtitling ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Type size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isSubtitling ? 'adding…' : 'subtitles'}
+                        {isSubtitling ? 'Adding…' : 'Subtitles'}
                     </button>
 
                     <button
@@ -859,7 +902,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isHooking ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Wand2 size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isHooking ? 'adding…' : 'viral hook'}
+                        {isHooking ? 'Adding…' : (hookText ? 'Edit Hook' : 'Viral Hook')}
                     </button>
 
                     <button
@@ -868,14 +911,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         className={QUIET_BTN}
                     >
                         {isTranslating ? <Loader2 size={16} className="animate-spin text-brass shrink-0" /> : <Languages size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" />}
-                        {isTranslating ? 'translating…' : 'dub voice'}
+                        {isTranslating ? 'Translating…' : 'Dub Voice'}
                     </button>
 
                     <button
                         onClick={() => setShowModal(true)}
                         className="btn-primary flex-col gap-1 py-2 px-1 text-[11px] rounded-input whitespace-nowrap"
                     >
-                        <Share2 size={16} className="shrink-0" /> post
+                        <Share2 size={16} className="shrink-0" /> Post
                     </button>
                     <button
                         onClick={(e) => {
@@ -890,7 +933,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         }}
                         className={`${QUIET_BTN}${onEditClip ? ' col-span-2' : ''}`}
                     >
-                        <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" /> download
+                        <Download size={16} className="text-muted group-hover:text-brass transition-colors shrink-0" /> Download
                     </button>
                 </div>
             </div>
@@ -900,7 +943,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 isOpen={showDescModal}
                 onClose={() => setShowDescModal(false)}
                 eyebrow="GENERATED COPY"
-                title="descriptions"
+                title="Descriptions"
                 size="md"
             >
                 <div className="space-y-4">
@@ -943,12 +986,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 isOpen={showModal}
                 onClose={() => setShowModal(false)}
                 eyebrow="PUBLISH"
-                title="post clip"
+                title="Post Clip"
                 size="md"
                 footer={
                     noAccountsConnected ? (
                         <button onClick={handleConnectAccounts} className="btn-primary w-full">
-                            <Link2 size={16} /> connect accounts
+                            <Link2 size={16} /> Connect Accounts
                         </button>
                     ) : (
                         <button
@@ -956,7 +999,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             disabled={posting || !canPost}
                             className="btn-primary w-full"
                         >
-                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'scheduling…' : 'publishing…'}</> : <><Share2 size={16} /> {isScheduling ? 'schedule post' : 'publish now'}</>}
+                            {posting ? <><Loader2 size={16} className="animate-spin" /> {isScheduling ? 'Scheduling…' : 'Publishing…'}</> : <><Share2 size={16} /> {isScheduling ? 'Schedule Post' : 'Publish Now'}</>}
                         </button>
                     )
                 }
@@ -964,14 +1007,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {!canPost && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">configure api key in settings first.</div>
+                        <div>Configure API Key in Settings first.</div>
                     </div>
                 )}
 
                 {noAccountsConnected && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div className="lowercase">no social accounts connected yet — link tiktok, instagram or youtube to publish this clip.</div>
+                        <div>No social accounts connected yet — link TikTok, Instagram, or YouTube to publish this clip.</div>
                     </div>
                 )}
 
@@ -982,11 +1025,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {platforms.tiktok && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
-                        <div className="lowercase">
-                            tiktok arrives as a <b className="text-ink">draft</b>, not a live post — you'll
-                            get a notification in the app. finishing it there lets you add trending
-                            sounds, effects and hashtags, which reaches more people than posting
-                            straight from an api.
+                        <div>
+                            TikTok arrives as a <b className="text-ink">draft</b>, not a live post — you'll
+                            get a notification in the app. Finishing it there lets you add trending
+                            sounds, effects, and hashtags, which reaches more people than posting
+                            straight from an API.
                         </div>
                     </div>
                 )}
@@ -1000,7 +1043,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             value={postTitle}
                             onChange={(e) => setPostTitle(e.target.value)}
                             className="input-field"
-                            placeholder="enter a catchy title…"
+                            placeholder="Enter a catchy title…"
                         />
                     </div>
 
@@ -1011,15 +1054,15 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                             onChange={(e) => setPostDescription(e.target.value)}
                             rows={4}
                             className="input-field resize-none"
-                            placeholder="write a caption for your post…"
+                            placeholder="Write a caption for your post…"
                         />
                     </div>
 
                     {/* Scheduling */}
                     <div className="p-3 bg-paper rounded-input border border-rule">
                         <label className="flex items-center justify-between cursor-pointer">
-                            <span className="flex items-center gap-2 text-sm text-ink2 lowercase">
-                                <Calendar size={16} className={isScheduling ? 'text-brass' : 'text-muted'} /> schedule post
+                            <span className="flex items-center gap-2 text-sm text-ink2">
+                                <Calendar size={16} className={isScheduling ? 'text-brass' : 'text-muted'} /> Schedule Post
                             </span>
                             <input
                                 type="checkbox"
@@ -1072,17 +1115,19 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onClose={() => setShowSubtitleModal(false)}
                 onGenerate={handleSubtitle}
                 onApplyAll={onBulkSubtitle ? async (options) => {
-                    await onBulkSubtitle(options);
-                    setShowSubtitleModal(false);
+                    const result = await onBulkSubtitle(options);
+                    if (result?.ok) setShowSubtitleModal(false);
                 } : undefined}
                 onRemove={handleRemoveSubtitles}
                 bulkCount={clipCount}
                 bulkProgress={bulkProgress}
                 isProcessing={isSubtitling || (bulkProgress?.running ?? false)}
-                videoUrl={originalVideoUrl}
+                error={editError}
+                videoUrl={currentBaseVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
                 existingHook={activeLayers.hook}
+                existingSubtitles={subtitleConfig}
             />
 
             <HookModal
@@ -1090,12 +1135,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}
                 isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
-                initialText={clip.viral_hook_text}
+                videoUrl={currentBaseVideoUrl}
+                initialText={hookText}
                 durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
                 existingSubtitles={activeLayers.subtitles}
                 hasCaptions={!!activeLayers.subtitles || /(^|_)subtitled_/.test(serverVideoFile || '')}
-                serverRender={hasServerBurns}
+                serverRender={true}
                 burnedHook={burnedHook}
                 onRemove={burnedHook ? handleRemoveHook : null}
             />

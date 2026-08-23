@@ -104,7 +104,7 @@ class TestGeneralLayout:
         for out_h in (1920, 1080, 1078, 976):
             graph = general_filtergraph(1080, out_h)
             fg = graph.split("[fga]scale=-2:")[1]
-            h = int(fg.split(",")[0])
+            h = int(fg.split(",")[0].split(":", 1)[0])
             assert h % 2 == 0, (out_h, h)
 
     def test_overflow_is_trimmed_never_padded(self):
