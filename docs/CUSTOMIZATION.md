@@ -234,6 +234,11 @@ and focuses on the delivered video and its editor controls.
   filenames, lets the backend resolve each clip's current canonical file, and
   reports progress plus the first failed clip instead of silently swallowing
   non-2xx responses.
+- The modal's `none`, `pop`, `word-highlight`, and `karaoke` animation choices
+  are now sent to the backend and mapped to the matching durable ASS renderer;
+  the server no longer falls back to a plain SRT burn after a styled preview.
+  ASS sizing is also scaled to the 1080x1920 preview coordinate system so
+  applied captions remain compact instead of rendering as oversized text.
 
 The clean clip remains beside every derived output. Hook entrance animation is
 still a browser-preview control; server-persisted hook output is static by

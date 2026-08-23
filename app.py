@@ -2094,7 +2094,8 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 
 from editor import VideoEditor
-from subtitles import generate_srt, generate_ass, burn_subtitles, generate_srt_from_video
+from subtitles import (generate_srt, generate_ass, burn_subtitles,
+                       generate_srt_from_video, resolve_render_style)
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
@@ -2296,6 +2297,7 @@ class SubtitleRequest(BaseModel):
     bg_color: str = "#000000"
     bg_opacity: float = 0.0
     style: str = "classic"  # classic (uniform color) or karaoke (word highlight)
+    animation: str = "none"  # none | pop | word-highlight | karaoke
     highlight_color: str = "#FFD700"
     effect: str = "none"  # none | glow | pop | box (karaoke only)
     base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
@@ -3274,7 +3276,9 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
 
     # Define outputs
     generation_id = time.time_ns()
-    is_karaoke = req.style == "karaoke"
+    render_style, render_effect = resolve_render_style(
+        req.style, req.animation, req.effect)
+    is_karaoke = render_style == "karaoke"
     srt_filename = f"subs_{req.clip_index}_{generation_id}.{'ass' if is_karaoke else 'srt'}"
     srt_path = os.path.join(output_dir, srt_filename)
 
@@ -3284,7 +3288,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         font_color=req.font_color, border_color=req.border_color,
         border_width=req.border_width, highlight_color=req.highlight_color,
         bg_color=req.bg_color, bg_opacity=req.bg_opacity,
-        effect=req.effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        effect=render_effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
     )
 
     # Output video
@@ -3375,7 +3379,9 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
 
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+        "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "render_style": render_style,
+        "render_effect": render_effect,
     }
 
 class RemoveSubtitlesRequest(BaseModel):

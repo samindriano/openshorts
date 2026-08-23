@@ -210,6 +210,25 @@ class TestGenerateAss:
         assert "&H00FFFFFF" in content  # pure white, no dimming
 
 
+class TestRenderStyleResolution:
+    def test_animation_maps_to_durable_karaoke_renderer(self):
+        from subtitles import resolve_render_style
+
+        assert resolve_render_style("classic", "word-highlight", "none") == ("karaoke", "glow")
+        assert resolve_render_style("classic", "pop", "none") == ("karaoke", "pop")
+        assert resolve_render_style("classic", "karaoke", "none") == ("karaoke", "none")
+
+    def test_none_animation_keeps_classic_renderer(self):
+        from subtitles import resolve_render_style
+
+        assert resolve_render_style("classic", "none", "glow") == ("classic", "none")
+
+    def test_karaoke_preset_keeps_selected_effect(self):
+        from subtitles import resolve_render_style
+
+        assert resolve_render_style("karaoke", "none", "box") == ("karaoke", "box")
+
+
 class TestBurnFilterFonts:
     """The ffmpeg filter must point libass at the bundled fonts dir — without
     it every UI font choice silently falls back to DejaVu (issue #57)."""

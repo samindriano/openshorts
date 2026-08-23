@@ -75,7 +75,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const [borderWidth, setBorderWidth] = useState(2);
     const [bgColor, setBgColor] = useState('#000000');
     const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('pop');
+    const [animation, setAnimation] = useState('none');
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
@@ -462,7 +462,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             const styleOptions = {
                                 position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
                                 // Karaoke burn (server-side ASS render)
-                                style, effect, baseOpacity, uppercase, highlightColor,
+                                style, effect, animation, baseOpacity, uppercase, highlightColor,
                                 // Remotion data
                                 remotion: useRemotionPreview ? subtitleConfig : null,
                                 captions: textEdited ? captions : null,

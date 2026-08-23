@@ -447,6 +447,7 @@ function App() {
             bg_color: options.bgColor,
             bg_opacity: options.bgOpacity,
             style: options.style || 'classic',
+            animation: options.animation || 'none',
             highlight_color: options.highlightColor || '#FFD700',
             effect: options.effect || 'none',
             base_opacity: options.baseOpacity ?? 1.0,
