@@ -22,6 +22,7 @@ import AdvancedBanner from './components/AdvancedBanner';
 import HistoryTab from './components/HistoryTab';
 import ProfileMenu from './components/ProfileMenu';
 import Modal from './components/ui/Modal';
+import AIProviderModal from './components/AIProviderModal';
 import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
@@ -210,6 +211,7 @@ function App() {
   const [durableClips, setDurableClips] = useState({});
 
   const [apiKey, setApiKey] = useState(localStorage.getItem('gemini_key') || '');
+  const [openaiApiKey, setOpenaiApiKey] = useState(localStorage.getItem('openai_key') || '');
   // Social API State - Load encrypted or plain
   const [uploadPostKey, setUploadPostKey] = useState(() => {
     const stored = localStorage.getItem('uploadPostKey_v3');
@@ -240,6 +242,8 @@ function App() {
     try { return localStorage.getItem('os_social_nudge_dismissed') === '1'; } catch (_) { return false; }
   });
   const [showKeyModal, setShowKeyModal] = useState(false);
+  const [showProviderModal, setShowProviderModal] = useState(false);
+  const [pendingProcess, setPendingProcess] = useState(null);
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
@@ -634,6 +638,10 @@ function App() {
   }, [apiKey]);
 
   useEffect(() => {
+    if (openaiApiKey) localStorage.setItem('openai_key', openaiApiKey);
+  }, [openaiApiKey]);
+
+  useEffect(() => {
     if (uploadPostKey) {
       localStorage.setItem('uploadPostKey_v3', encrypt(uploadPostKey));
     }
@@ -763,8 +771,9 @@ function App() {
   };
 
   // Hosted is paid-only (no BYOK core). Self-host uses BYOK keys.
-  // `keysMissing` now means "self-host BYOK keys missing" — it never fires on hosted.
-  const keysMissing = !billingEnabled && (!apiKey || !uploadPostKey);
+  // Clip generation needs one AI provider key. Upload-Post remains a separate
+  // publishing credential and must not block analysis.
+  const keysMissing = !billingEnabled && !apiKey && !openaiApiKey;
   const needsPlan = billingEnabled && !isManaged;   // hosted, signed-out or no active plan/trial
 
   // Fresh sign-up: show the welcome plan-choice popup once (AuthContext set the
@@ -825,15 +834,7 @@ function App() {
     }
   };
 
-  const handleProcess = async (data, forceLowQuality = false) => {
-    // Hosted: must be signed in AND on an active plan/trial. Self-host: BYOK keys.
-    if (billingEnabled) {
-      if (!isSignedIn) { setShowLogin(true); return; }
-      if (!isManaged) { window.location.hash = '#/pricing'; return; }
-    } else if (keysMissing) {
-      setShowKeyModal(true);
-      return;
-    }
+  const beginProcess = async (data, forceLowQuality, aiProvider) => {
     setStatus('processing');
     setLogs(["Starting process..."]);
     setResults(null);
@@ -846,9 +847,13 @@ function App() {
 
     try {
       let body;
-      // BYOK sends the Gemini header; managed users rely on the bearer token
-      // that apiFetch attaches automatically.
-      const headers = apiKey ? { 'X-Gemini-Key': apiKey } : {};
+      // Self-host BYOK sends only the selected provider header. Managed users
+      // rely on the bearer token that apiFetch attaches automatically.
+      const headers = {};
+      if (!billingEnabled) {
+        if (aiProvider === 'openai' && openaiApiKey) headers['X-OpenAI-Key'] = openaiApiKey;
+        if (aiProvider === 'gemini' && apiKey) headers['X-Gemini-Key'] = apiKey;
+      }
 
       // Advanced generation controls: only sent when the user set them, so the
       // default request stays byte-identical to the pre-feature one.
@@ -866,6 +871,7 @@ function App() {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           url: data.payload,
+          ai_provider: aiProvider,
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           force_low_quality: forceLowQuality,
@@ -877,6 +883,7 @@ function App() {
         headers['Content-Type'] = 'application/json';
         body = JSON.stringify({
           thumbnail_session_id: data.payload,
+          ai_provider: aiProvider,
           acknowledged: !!data.acknowledged,
           output_format: data.outputFormat || 'auto',
           ...Object.fromEntries(Object.entries(advanced).filter(([, v]) => v != null)),
@@ -886,6 +893,7 @@ function App() {
         formData.append('file', data.payload);
         formData.append('acknowledged', data.acknowledged ? 'true' : 'false');
         formData.append('output_format', data.outputFormat || 'auto');
+        formData.append('ai_provider', aiProvider);
         for (const [k, v] of Object.entries(advanced)) {
           if (v != null) formData.append(k, v);
         }
@@ -901,7 +909,7 @@ function App() {
       // 20 min on it. On confirm we resend with force_low_quality.
       if (resData.needs_confirmation) {
         setStatus('idle');
-        setQualityGate({ info: resData.quality_check, data });
+        setQualityGate({ info: resData.quality_check, data, aiProvider });
         return;
       }
 
@@ -926,6 +934,30 @@ function App() {
       setStatus('error');
       setLogs(l => [...l, `Error starting job: ${e.message}`]);
     }
+  };
+
+  const handleProcess = async (data, forceLowQuality = false) => {
+    // Hosted: must be signed in and on an active plan/trial; hosted analysis is
+    // still Gemini-managed. Self-host: choose the provider per job.
+    if (billingEnabled) {
+      if (!isSignedIn) { setShowLogin(true); return; }
+      if (!isManaged) { window.location.hash = '#/pricing'; return; }
+      return beginProcess(data, forceLowQuality, 'gemini');
+    }
+    if (keysMissing) {
+      setShowKeyModal(true);
+      return;
+    }
+    setPendingProcess({ data, forceLowQuality });
+    setShowProviderModal(true);
+  };
+
+  const chooseProvider = (aiProvider) => {
+    if (!pendingProcess) return;
+    const { data, forceLowQuality } = pendingProcess;
+    setPendingProcess(null);
+    setShowProviderModal(false);
+    beginProcess(data, forceLowQuality, aiProvider);
   };
 
   const handleReset = () => {
@@ -1084,11 +1116,9 @@ function App() {
               >
                 <AlertTriangle size={12} />
                 <span className="hidden sm:inline">
-                  {!apiKey && !uploadPostKey
-                    ? 'Gemini & Upload-Post keys missing'
-                    : !apiKey
-                      ? 'Gemini API Key Missing'
-                      : 'Upload-Post API Key Missing'}
+                    {!apiKey && !openaiApiKey
+                     ? 'AI provider keys missing'
+                     : 'AI provider key missing'}
                 </span>
                 <span className="sm:hidden">keys missing</span>
               </button>
@@ -1104,11 +1134,9 @@ function App() {
               <div>
                 <span className="font-medium text-ink">Required API keys missing.</span>{' '}
                 <span className="text-muted">
-                  {!apiKey && !uploadPostKey
-                    ? 'Set your Gemini and Upload-Post API keys to use OpenShorts.'
-                    : !apiKey
-                      ? 'Set your Gemini API key to use OpenShorts.'
-                      : 'Set your Upload-Post API key to use OpenShorts.'}
+                  {!apiKey && !openaiApiKey
+                    ? 'Set a Gemini or OpenAI key to generate clips.'
+                    : 'Set an AI provider key to generate clips.'}
                 </span>
               </div>
             </div>
@@ -1201,7 +1229,16 @@ function App() {
                 </div>
               ) : (
                 <>
+              <p className="eyebrow mb-4">AI PROVIDERS</p>
               <KeyInput onKeySet={setApiKey} savedKey={apiKey} />
+              <KeyInput
+                onKeySet={setOpenaiApiKey}
+                savedKey={openaiApiKey}
+                title="OpenAI API Key"
+                placeholder="sk-..."
+                helpHref="https://platform.openai.com/api-keys"
+                helpText="Get your OpenAI API key here →"
+              />
 
               <div className="card p-4 sm:p-6 mt-8">
                 <div className="flex flex-wrap items-center justify-between gap-2 mb-4">
@@ -1657,9 +1694,18 @@ function App() {
                       {results.clips.length} Clips
                     </span>
                   )}
-                  {results?.cost_analysis && !isManaged && (
-                    <span className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2" title={`Input: ${results.cost_analysis.input_tokens} | Output: ${results.cost_analysis.output_tokens}`}>
-                      GEMINI · ${results.cost_analysis.total_cost.toFixed(5)}
+                  {(results?.ai_provider || results?.cost_analysis?.provider) && (
+                    <span
+                      className="readout bg-paper3 px-2.5 py-1 rounded-full ml-2"
+                      title={results.cost_analysis
+                        ? `Input: ${results.cost_analysis.input_tokens ?? 'unknown'} | Output: ${results.cost_analysis.output_tokens ?? 'unknown'}`
+                        : 'Provider usage was not returned'}
+                    >
+                      {(results.ai_provider || results.cost_analysis.provider).toUpperCase()}
+                      {` · ${results.ai_model || results.cost_analysis.model || 'model unknown'}`}
+                      {Number.isFinite(results.cost_analysis?.total_cost)
+                        ? ` · $${results.cost_analysis.total_cost.toFixed(5)}`
+                        : ' · cost unknown'}
                     </span>
                   )}
                   {results?.clips?.length > 0 && status === 'complete' && (
@@ -1792,16 +1838,32 @@ function App() {
 
       </main>
 
+      <AIProviderModal
+        isOpen={showProviderModal}
+        onClose={() => {
+          setShowProviderModal(false);
+          setPendingProcess(null);
+        }}
+        onChoose={chooseProvider}
+        onOpenSettings={() => {
+          setShowProviderModal(false);
+          setPendingProcess(null);
+          setActiveTab('settings');
+        }}
+        geminiConfigured={!!apiKey}
+        openaiConfigured={!!openaiApiKey}
+      />
+
       {/* Missing API Key Modal */}
       <Modal
         isOpen={showKeyModal}
         onClose={() => setShowKeyModal(false)}
         eyebrow="SETUP"
-        title={!apiKey && !uploadPostKey
-          ? 'Required API Keys Missing'
+        title={!apiKey && !openaiApiKey
+          ? 'AI Provider Key Required'
           : !apiKey
             ? 'Gemini API Key Required'
-            : 'Upload-Post API Key Required'}
+            : 'OpenAI API Key Required'}
         footer={
           <div className="flex gap-3">
             <button
@@ -1821,7 +1883,7 @@ function App() {
       >
         <div className="space-y-4">
           <p className="text-sm text-muted">
-            OpenShorts needs both a <strong className="text-ink2">Gemini</strong> API key and an <strong className="text-ink2">Upload-Post</strong> API key. Both have free tiers.
+            OpenShorts needs one AI provider key to generate clips. Add Gemini or OpenAI in Settings, then choose the provider for each job.
           </p>
 
           {/* Gemini block */}
@@ -1852,30 +1914,26 @@ function App() {
             )}
           </div>
 
-          {/* Upload-Post block */}
-          <div className={`rounded-input p-4 space-y-2 border ${!uploadPostKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
+          {/* OpenAI block */}
+          <div className={`rounded-input p-4 space-y-2 border ${!openaiApiKey ? 'border-rule2' : 'border-rule opacity-70'}`}>
             <p className="text-xs font-medium text-ink flex items-center gap-2">
-              {uploadPostKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
-              Upload-Post API Key {uploadPostKey && <span className="text-ok">— set</span>}
+              {openaiApiKey ? <Check size={12} className="text-ok" /> : <AlertTriangle size={12} className="text-warn" />}
+              OpenAI API Key {openaiApiKey && <span className="text-ok">— set</span>}
             </p>
-            {!uploadPostKey && (
+            {!openaiApiKey && (
               <>
-                <p className="text-xs text-muted">
-                  Required to publish your clips to TikTok, Instagram Reels, and YouTube Shorts. Free tier available, no credit card needed.
-                </p>
                 <ol className="text-xs text-muted space-y-1 list-decimal list-inside">
-                  <li>Register at <a href="https://app.upload-post.com/login" target="_blank" rel="noopener noreferrer" className="text-brass underline">app.upload-post.com</a></li>
-                  <li>Connect your TikTok, Instagram, or YouTube accounts</li>
-                  <li>Go to <a href="https://app.upload-post.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">API Keys</a> and generate one</li>
+                  <li>Go to <a href="https://platform.openai.com/api-keys" target="_blank" rel="noopener noreferrer" className="text-brass underline">platform.openai.com/api-keys</a></li>
+                  <li>Create or copy an API key</li>
                   <li>Paste it below</li>
                 </ol>
                 <input
                   type="text"
-                  placeholder="Paste your Upload-Post API key here..."
+                  placeholder="Paste your OpenAI API key here..."
                   className="input-field"
                   onKeyDown={(e) => {
                     if (e.key === 'Enter' && e.target.value.trim()) {
-                      setUploadPostKey(e.target.value.trim());
+                      setOpenaiApiKey(e.target.value.trim());
                     }
                   }}
                 />
@@ -1911,7 +1969,11 @@ function App() {
             <div className="flex gap-2 justify-end pt-2">
               <button onClick={() => setQualityGate(null)} className="btn-ghost">cancel</button>
               <button
-                onClick={() => { const d = qualityGate.data; setQualityGate(null); handleProcess(d, true); }}
+                onClick={() => {
+                  const gate = qualityGate;
+                  setQualityGate(null);
+                  beginProcess(gate.data, true, gate.aiProvider || 'gemini');
+                }}
                 className="btn-primary"
               >
                 process anyway

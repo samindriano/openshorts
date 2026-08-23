@@ -26,15 +26,19 @@ What is different here is the question asked and what the answer is used for.
     speaker, which is a reasonable frame even when the trigger was wrong.
 
 Off by default (``SCREENCAST_LAYOUT=1``). Needs GEMINI_API_KEY; without one it
-is a silent no-op, like every other optional Gemini path here.
+is a silent no-op, like every other optional Gemini path here. It is also
+disabled for OpenAI-selected jobs so an OpenAI run never makes a hidden Gemini
+vision request during rendering.
 """
-import json
 import os
 import time
 
 import numpy as np
 
-ENABLED = os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
+ENABLED = (
+    os.environ.get("SCREENCAST_LAYOUT", "0") == "1"
+    and os.environ.get("AI_PROVIDER", "gemini").strip().lower() != "openai"
+)
 
 # Fraction of the frame width the content must span. A corner ticker, logo or
 # channel bug sits far below this; a screen recording, slide or spreadsheet sits
@@ -170,7 +174,8 @@ def detect_content_ranges(video_path, video_duration):
     Returns (start, end, what, width_fraction) tuples, or [] on any failure:
     a missing answer must degrade to today's routing rather than break the job.
     """
-    if not ENABLED:
+    if (not ENABLED or
+            os.environ.get("AI_PROVIDER", "gemini").strip().lower() == "openai"):
         return []
     api_key = os.getenv("GEMINI_API_KEY")
     if not api_key:
@@ -179,6 +184,7 @@ def detect_content_ranges(video_path, video_duration):
     from google import genai
     from google.genai import types as genai_types
     import gemini_worker
+    import gemini_rate_limiter
 
     model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
     print("🔎 Checking for full-width on-screen content…")
@@ -196,17 +202,34 @@ def detect_content_ranges(video_path, video_duration):
                 return []
             time.sleep(2)
 
-        response = client.models.generate_content(
-            model=model_name,
-            contents=[file_upload,
-                      gemini_worker.WIDE_CONTENT_PROMPT_TEMPLATE.format(
-                          video_duration=video_duration)],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.WideContentResponse,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        raw = (json.loads(response.text) or {}).get("ranges") or []
+        prompt = gemini_worker.WIDE_CONTENT_PROMPT_TEMPLATE.format(
+            video_duration=video_duration)
+        config = genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=gemini_worker.WideContentResponse,
+        )
+
+        def _handle_response(response):
+            gemini_worker.raise_if_blocked(response)
+            parsed = getattr(response, "parsed", None)
+            if parsed is not None:
+                return parsed.model_dump() if hasattr(parsed, "model_dump") else parsed
+            return gemini_worker._parse_json_response_text(
+                gemini_worker._get_response_text(response))
+
+        parsed = gemini_rate_limiter.call_with_retry(
+            lambda: client.models.generate_content(
+                model=model_name,
+                contents=[file_upload, prompt],
+                config=config,
+            ),
+            label="on-screen content analysis",
+            estimated_tokens=gemini_rate_limiter.estimate_tokens(
+                prompt, extra_tokens=max(0, int(video_duration * 300))),
+            handle_response=_handle_response,
+            non_retryable_exceptions=(gemini_worker.GeminiBlockedError,),
+        )
+        raw = parsed.get("ranges") or []
     except Exception as e:
         print(f"   ⚠️ On-screen check failed ({e}) — keeping face-only routing.")
         return []

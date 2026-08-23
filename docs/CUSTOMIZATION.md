@@ -232,3 +232,43 @@ Remaining limitations and reported failures:
 This is a reproducible vanilla runtime baseline for manual testing with the
 credential/model limitations above. No prompts, UI, n8n, TikTok, or affiliate
 functionality was changed.
+
+## Gemini rate-limit handling
+
+The Clip Generator uses two transcript-analysis passes: one Gemini request per
+scoring batch of eight transcript windows, followed by one detail-selection
+request. A source with `N` scoring batches therefore normally makes `N + 1`
+transcript-analysis requests. Optional automatic layout/content analysis adds
+at most one request per enabled module; these calls use the same limiter.
+
+Set the published project ceilings in the local `.env`:
+
+```dotenv
+GEMINI_TPM_LIMIT=250000
+GEMINI_RPM_LIMIT=15
+GEMINI_RATE_HEADROOM=0.90
+```
+
+The default 90% headroom makes the effective local budget approximately
+225,000 tokens per rolling minute and 13 requests per rolling minute. Requests
+are reserved using a conservative prompt/contents estimate, then corrected
+with Gemini `usage_metadata` when the SDK provides it; no separate token-count
+API call is made. Uploaded-video and sampled-image calls add a documented
+conservative contents estimate because character counting cannot represent
+those parts.
+
+The limiter is shared by jobs in the same backend deployment, including the
+separate `main.py` subprocesses used by the current job queue, through a small
+rolling ledger at the system temporary path. Override it with
+`GEMINI_RATE_LIMIT_STATE_PATH` when the deployment needs a different writable
+location. A missing TPM/RPM configuration leaves proactive budgeting disabled
+for upstream compatibility, but bounded transient retries remain active.
+
+Gemini 429/resource-exhausted responses use Google `Retry-After`/`RetryInfo`
+timing when present; otherwise retries use exponential backoff with jitter.
+Retries are bounded by `GEMINI_MAX_RETRIES` (default `5`) and do not retry
+authentication or invalid-key errors. The no-config default is two retries
+(three total attempts) for upstream compatibility; the local example sets
+`GEMINI_MAX_RETRIES=5`. A retry stays inside the current analysis stage, so
+completed scoring batches, transcription, and source downloads are not
+repeated.
