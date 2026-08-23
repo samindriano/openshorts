@@ -297,6 +297,7 @@ function App() {
       index: Number(i),
       active_layers: v.activeLayers,
       server_file: v.serverVideoFile,
+      subtitle_config: v.subtitleConfig,
     }));
     s.pending = {};
     apiFetch(`/api/projects/${s.jobId}/state`, {
@@ -365,6 +366,29 @@ function App() {
       const clips = prev.clips.slice();
       clips[index] = { ...clips[index], video_url: videoUrl, ...(patch || {}) };
       return { ...prev, clips };
+    });
+    // A server edit creates a new version immediately, while the background
+    // archive may still point at the previous object. Never let the old
+    // durable URL win the race after apply/remove.
+    setDurableClips((prev) => {
+      if (!(index in prev)) return prev;
+      const next = { ...prev };
+      delete next[index];
+      return next;
+    });
+    setProjectState((prev) => {
+      if (!prev?.clips) return prev;
+      const hasSubtitleConfig = Object.prototype.hasOwnProperty.call(patch || {}, 'subtitle_config');
+      return {
+        ...prev,
+        clips: prev.clips.map((c) => (c.index === index
+          ? {
+              ...c,
+              server_file: (patch?.server_file || videoUrl).split('/').pop(),
+              ...(hasSubtitleConfig ? { subtitle_config: patch.subtitle_config } : {}),
+            }
+          : c)),
+      };
     });
   };
 
@@ -463,6 +487,24 @@ function App() {
           if (!data?.new_video_url) {
             errors++;
             firstError ||= `Clip ${i + 1}: server returned no output file.`;
+          } else {
+            setDurableClips((prev) => {
+              if (!(i in prev)) return prev;
+              const next = { ...prev };
+              delete next[i];
+              return next;
+            });
+            setResults((prev) => {
+              if (!prev?.clips?.[i]) return prev;
+              const nextClips = prev.clips.slice();
+              nextClips[i] = {
+                ...nextClips[i],
+                video_url: data.new_video_url,
+                render_revision: data.revision || null,
+                subtitle_config: data.subtitle_config || null,
+              };
+              return { ...prev, clips: nextClips };
+            });
           }
         }
       } catch (e) {

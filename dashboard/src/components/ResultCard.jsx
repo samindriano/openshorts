@@ -10,6 +10,7 @@ import SegmentedControl from './ui/SegmentedControl';
 import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
+import { cacheBustVideoUrl, filenameFromVideoUrl, selectPlaybackUrl } from '../lib/videoSource';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1 py-2 px-1 rounded-input border border-rule hover:bg-paper3 text-[11px] lowercase text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -51,8 +52,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         do { prev = f; f = f.replace(/^subtitled_\d+_/, '').replace(/^hooked_\d+_/, '').replace(/^hook_/, ''); } while (f !== prev);
         return f;
     };
-    const originalVideoUrl = getApiUrl((clip.video_url || '').replace(/[^/]+$/, stripBurns((clip.video_url || '').split('/').pop())));
-    const [currentVideoUrl, setCurrentVideoUrl] = useState(getApiUrl(clip.video_url));
+    const [currentVideoUrl, setCurrentVideoUrl] = useState(
+        cacheBustVideoUrl(getApiUrl(clip.video_url), clip.render_revision)
+    );
     // Where the <video> element pulls its bytes from. The clips are archived to
     // R2 anyway, and R2 egress is free and edge-served, while /videos is served
     // by the same single-worker API process that is running the renders. So play
@@ -99,7 +101,18 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // All server-side operations must chain from this, so burned-in edits
     // (subtitles, hooks, effects) never get silently dropped.
     // A reopened project seeds it from the persisted project state.
-    const [serverVideoFile, setServerVideoFile] = useState(initialState?.server_file || (clip.video_url || '').split('/').pop());
+    const [serverVideoFile, setServerVideoFile] = useState(
+        initialState?.server_file || filenameFromVideoUrl(clip.video_url)
+    );
+    const [subtitleConfig, setSubtitleConfig] = useState(
+        clip.subtitle_config || initialState?.subtitle_config || null
+    );
+    // Always preview/composite from the clean file for the CURRENT cut. The
+    // old implementation froze this to the first clip.video_url, so a recut or
+    // edit could make the modal preview/render fall back to an older cut.
+    const currentBaseVideoUrl = getApiUrl(
+        `/videos/${jobId}/${stripBurns(serverVideoFile)}`
+    );
     const [videoErrored, setVideoErrored] = useState(false);
     const [resolution, setResolution] = useState(null);
 
@@ -130,11 +143,13 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // subtitles applied from another card), adopt it so the card shows the
     // freshly subtitled video instead of a stale one.
     useEffect(() => {
-        const serverUrl = getApiUrl(clip.video_url);
-        const serverName = (clip.video_url || '').split('/').pop();
+        const serverUrl = cacheBustVideoUrl(getApiUrl(clip.video_url), clip.render_revision);
+        const serverName = filenameFromVideoUrl(clip.video_url);
         if (serverName && serverName !== serverVideoFile) {
             setServerVideoFile(serverName);
             setCurrentVideoUrl(serverUrl);
+            setSubtitleConfig(clip.subtitle_config || null);
+            setDurableSrc(null);
             setDurableFailed(false);
             setHasPlayed(false);
             if (videoRef.current) videoRef.current.load();
@@ -189,9 +204,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const stateReported = React.useRef(false);
     useEffect(() => {
         if (!stateReported.current) { stateReported.current = true; return; }
-        onStateChange?.(index, { activeLayers, serverVideoFile });
+        onStateChange?.(index, { activeLayers, serverVideoFile, subtitleConfig });
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [activeLayers, serverVideoFile]);
+    }, [activeLayers, serverVideoFile, subtitleConfig]);
 
     // True when the current server file already carries burned-in content.
     // Browser (Remotion) renders compose over the ORIGINAL clip, so using them
@@ -203,6 +218,33 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // after edits without refetching the job.
     const [burnedHook, setBurnedHook] = useState(clip.auto_hook?.text || null);
     const hookText = burnedHook || clip.auto_hook?.text || clip.viral_hook_text || null;
+
+    // Adopt a server render as one atomic client-side version. Clear the
+    // durable fallback first: its signed URL may still point at the previous
+    // archived file while the new render is being re-archived. The filename is
+    // already unique, and the revision query also prevents a cached response
+    // from winning when a clean file is reused after subtitle removal.
+    const adoptServerVideo = (data, patch = {}) => {
+        const nextFile = data.server_file || filenameFromVideoUrl(data.new_video_url);
+        const nextUrl = cacheBustVideoUrl(getApiUrl(data.new_video_url), data.revision);
+        setServerVideoFile(nextFile);
+        setCurrentVideoUrl(nextUrl);
+        setDurableSrc(null);
+        setDurableFailed(false);
+        setVideoErrored(false);
+        setHasPlayed(false);
+        if (Object.prototype.hasOwnProperty.call(data, 'subtitle_config')) {
+            setSubtitleConfig(data.subtitle_config);
+        }
+        onVideoUpdated?.(index, data.new_video_url, {
+            render_revision: data.revision || null,
+            ...(Object.prototype.hasOwnProperty.call(data, 'subtitle_config')
+                ? { subtitle_config: data.subtitle_config }
+                : {}),
+            ...patch,
+        });
+        return nextUrl;
+    };
 
     // Fetch clip duration from transcript endpoint
     useEffect(() => {
@@ -281,7 +323,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     const newLayers = { ...activeLayers, effects: data.effects };
                     setActiveLayers(newLayers);
                     const blobUrl = await renderInBrowser({
-                        videoUrl: originalVideoUrl,
+                        videoUrl: currentBaseVideoUrl,
                         durationInSeconds: clipDuration,
                         subtitles: newLayers.subtitles,
                         hook: newLayers.hook,
@@ -352,9 +394,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (!data.new_video_url) throw new Error('Subtitle server returned no output file.');
-            const serverUrl = getApiUrl(data.new_video_url);
-            setServerVideoFile(data.new_video_url.split('/').pop());
-            onVideoUpdated?.(index, data.new_video_url);
+            const serverUrl = adoptServerVideo(data);
             const remaining = { ...activeLayers, subtitles: null };
             setActiveLayers(remaining);
             if (remaining.hook || remaining.effects) {
@@ -417,9 +457,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!data.new_video_url) {
                 throw new Error('Subtitle server returned no output file.');
             }
-            const serverUrl = getApiUrl(data.new_video_url);
-            setServerVideoFile(data.new_video_url.split('/').pop());
-            onVideoUpdated?.(index, data.new_video_url);
+            const serverUrl = adoptServerVideo(data);
             // Subtitles are burned into the server file now — drop the
             // browser subtitle layer and re-compose any remaining browser
             // layers (hook/effects) over the new file so they aren't lost.
@@ -682,9 +720,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     // Browser-rendered previews (Remotion) live in a blob: URL that exists only
     // in this tab, so they always win over the durable copy.
-    const playbackUrl = (durableSrc && !durableFailed && !String(currentVideoUrl || '').startsWith('blob:'))
-        ? durableSrc
-        : currentVideoUrl;
+    const playbackUrl = selectPlaybackUrl({ durableSrc, durableFailed, currentVideoUrl });
 
     const durationReadout = formatDuration(clip);
 
@@ -693,6 +729,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             {/* Left: Video Preview — 9:16 column matching the fixed card height */}
             <div className="w-full md:w-[236px] bg-black relative shrink-0 aspect-[9/16] md:aspect-auto group/video">
                 <video
+                    key={playbackUrl}
                     ref={videoRef}
                     src={playbackUrl}
                     controls
@@ -1086,10 +1123,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 bulkProgress={bulkProgress}
                 isProcessing={isSubtitling || (bulkProgress?.running ?? false)}
                 error={editError}
-                videoUrl={originalVideoUrl}
+                videoUrl={currentBaseVideoUrl}
                 jobId={jobId}
                 clipIndex={index}
                 existingHook={activeLayers.hook}
+                existingSubtitles={subtitleConfig}
             />
 
             <HookModal
@@ -1097,7 +1135,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 onClose={() => setShowHookModal(false)}
                 onGenerate={handleHook}
                 isProcessing={isHooking}
-                videoUrl={originalVideoUrl}
+                videoUrl={currentBaseVideoUrl}
                 initialText={hookText}
                 durationInSeconds={clip.end && clip.start ? clip.end - clip.start : 30}
                 existingSubtitles={activeLayers.subtitles}

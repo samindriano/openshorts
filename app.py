@@ -2309,6 +2309,37 @@ class SubtitleRequest(BaseModel):
     words: Optional[List[CaptionWordIn]] = None
 
 
+def _subtitle_config_from_request(req: SubtitleRequest) -> dict:
+    """Return the complete subtitle recipe that produced the current file.
+
+    The rendered MP4 is authoritative for playback, but keeping the recipe in
+    metadata/project state lets the modal reopen with the same controls and
+    edited words instead of reconstructing defaults from the original transcript.
+    """
+    config = {
+        "position": req.position,
+        "fontSize": req.font_size,
+        "fontName": req.font_name,
+        "fontColor": req.font_color,
+        "highlightColor": req.highlight_color,
+        "borderColor": req.border_color,
+        "borderWidth": req.border_width,
+        "bgColor": req.bg_color,
+        "bgOpacity": req.bg_opacity,
+        "style": req.style,
+        "animation": req.animation,
+        "effect": req.effect,
+        "baseOpacity": req.base_opacity,
+        "uppercase": req.uppercase,
+    }
+    if req.words is not None:
+        config["captions"] = [
+            {"text": word.text, "startMs": word.startMs, "endMs": word.endMs}
+            for word in req.words
+        ]
+    return config
+
+
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
 async def get_clip_transcript(job_id: str, clip_index: int, request: Request):
     """Return word-level captions for a specific clip, formatted for Remotion."""
@@ -3215,6 +3246,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         raise HTTPException(status_code=404, detail="Clip not found")
         
     clip_data = clips[req.clip_index]
+    subtitle_config = _subtitle_config_from_request(req)
 
     # Recut clips concatenate several source segments, so their caption window
     # is not the flat start..end range — restyle against the clip-relative
@@ -3275,11 +3307,15 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         raise HTTPException(status_code=404, detail=f"Video file not found: {input_path}")
 
     # Define outputs
+    # Nanosecond ids are intentionally part of the render identity. A
+    # second-resolution timestamp lets two quick applies collide and makes the
+    # browser/R2 version contract ambiguous.
     generation_id = time.time_ns()
+    revision = str(generation_id)
     render_style, render_effect = resolve_render_style(
         req.style, req.animation, req.effect)
     is_karaoke = render_style == "karaoke"
-    srt_filename = f"subs_{req.clip_index}_{generation_id}.{'ass' if is_karaoke else 'srt'}"
+    srt_filename = f"subs_{req.clip_index}_{revision}.{'ass' if is_karaoke else 'srt'}"
     srt_path = os.path.join(output_dir, srt_filename)
 
     # Style options shared by the karaoke ASS generator paths.
@@ -3293,7 +3329,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
 
     # Output video
     # We create a new file "subtitled_..."
-    output_filename = f"subtitled_{generation_id}_{filename}"
+    output_filename = f"subtitled_{revision}_{filename}"
     output_path = os.path.join(output_dir, output_filename)
 
     # Burning captions is FREE. They're table stakes for short-form — a clip
@@ -3355,31 +3391,44 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     if reservation_id:
         await _metering.commit_reservation(reservation_id)
 
-    # 3. Update Result and Metadata
-    # Update InMemory Jobs
-    if req.clip_index < len(job['result']['clips']):
-         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-    
-    # Update Metadata on Disk (Persistence)
-    try:
-        if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
-            # Update the main data structure
-            data['shorts'] = clips
-            
-            # Write back
-            with open(json_files[0], 'w') as f:
-                json.dump(data, f, indent=4)
+    # 3. Update the in-memory result and metadata from a fresh snapshot. The
+    # lock protects concurrent subtitle/rerender calls from writing one stale
+    # metadata document over another clip's newer version.
+    new_video_url = f"/videos/{req.job_id}/{output_filename}"
+    render_update = {
+        "video_url": new_video_url,
+        "render_revision": revision,
+        "subtitle_config": subtitle_config,
+    }
+    # Share the edit lock with rerender/reframe. Subtitle burns and clip edits
+    # both read/write metadata.json and the canonical file chain.
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        if req.clip_index < len(job['result']['clips']):
+            job['result']['clips'][req.clip_index].update(render_update)
+        try:
+            with open(json_files[0], 'r') as f:
+                current_data = json.load(f)
+            current_clips = current_data.get('shorts', [])
+            if req.clip_index < len(current_clips):
+                current_clips[req.clip_index].update(render_update)
+                current_data['shorts'] = current_clips
+                with open(json_files[0], 'w') as f:
+                    json.dump(current_data, f, indent=4)
                 print(f"✅ Metadata updated with subtitled video for clip {req.clip_index}")
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
-        # Non-critical, but good for persistence
+        except Exception as e:
+            print(f"⚠️ Failed to update metadata.json: {e}")
+            raise HTTPException(status_code=500, detail="Could not persist subtitle render state")
 
     _archive_clip_edit_bg(req.job_id, req.clip_index, output_filename)
 
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "new_video_url": new_video_url,
+        "server_file": output_filename,
+        "revision": revision,
+        "source_file": filename,
+        "subtitle_config": subtitle_config,
         "render_style": render_style,
         "render_effect": render_effect,
     }
@@ -3434,18 +3483,36 @@ async def remove_subtitles(req: RemoveSubtitlesRequest, request: Request):
                             detail="The original clip is no longer available.")
 
     new_url = f"/videos/{req.job_id}/{filename}"
-    if req.clip_index < len(job.get('result', {}).get('clips', [])):
-        job['result']['clips'][req.clip_index]['video_url'] = new_url
-    try:
-        clips[req.clip_index]['video_url'] = new_url
-        data['shorts'] = clips
-        with open(json_files[0], 'w') as f:
-            json.dump(data, f, indent=4)
-    except Exception as e:
-        print(f"⚠️ Failed to update metadata.json: {e}")
+    revision = f"remove-{time.time_ns()}"
+    render_update = {
+        "video_url": new_url,
+        "render_revision": revision,
+        "subtitle_config": None,
+    }
+    lock = _rerender_locks.setdefault(req.job_id, asyncio.Lock())
+    async with lock:
+        if req.clip_index < len(job.get('result', {}).get('clips', [])):
+            job['result']['clips'][req.clip_index].update(render_update)
+        try:
+            with open(json_files[0], 'r') as f:
+                current_data = json.load(f)
+            current_clips = current_data.get('shorts', [])
+            current_clips[req.clip_index].update(render_update)
+            current_data['shorts'] = current_clips
+            with open(json_files[0], 'w') as f:
+                json.dump(current_data, f, indent=4)
+        except Exception as e:
+            print(f"⚠️ Failed to update metadata.json: {e}")
+            raise HTTPException(status_code=500, detail="Could not persist subtitle removal state")
 
     _archive_clip_edit_bg(req.job_id, req.clip_index, filename)
-    return {"success": True, "new_video_url": new_url}
+    return {
+        "success": True,
+        "new_video_url": new_url,
+        "server_file": filename,
+        "revision": revision,
+        "subtitle_config": None,
+    }
 
 
 class HookRequest(BaseModel):

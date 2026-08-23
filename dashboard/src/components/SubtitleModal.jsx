@@ -65,9 +65,9 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, error, videoUrl, jobId, clipIndex, existingHook, bulkCount = 0, bulkProgress }) {
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, error, videoUrl, jobId, clipIndex, existingHook, existingSubtitles, bulkCount = 0, bulkProgress }) {
     const [position, setPosition] = useState('bottom');
-    const [fontSize] = useState(20);
+    const [fontSize, setFontSize] = useState(20);
     const [fontName, setFontName] = useState('Verdana');
     const [fontColor, setFontColor] = useState('#FFFFFF');
     const [highlightColor, setHighlightColor] = useState('#FFDD00');
@@ -108,6 +108,36 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const [captionsLoading, setCaptionsLoading] = useState(false);
     const [useRemotionPreview, setUseRemotionPreview] = useState(false);
 
+    // A server burn is the current durable version, so its recipe must be
+    // restored when the modal is reopened. Without this, every open silently
+    // rebuilt the controls from defaults even though the file had a different
+    // style and possibly edited words.
+    useEffect(() => {
+        if (!isOpen || !existingSubtitles) return;
+        const config = existingSubtitles;
+        setPosition(config.position || 'bottom');
+        setFontSize(Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : 20);
+        setFontName(config.fontName || 'Verdana');
+        setFontColor(config.fontColor || '#FFFFFF');
+        setHighlightColor(config.highlightColor || '#FFDD00');
+        setBorderColor(config.borderColor || '#000000');
+        setBorderWidth(Number.isFinite(Number(config.borderWidth)) ? Number(config.borderWidth) : 2);
+        setBgColor(config.bgColor || '#000000');
+        setBgOpacity(Number.isFinite(Number(config.bgOpacity)) ? Number(config.bgOpacity) : 0);
+        setStyle(config.style || 'classic');
+        setEffect(config.effect || 'none');
+        setAnimation(config.animation || 'none');
+        setBaseOpacity(Number.isFinite(Number(config.baseOpacity)) ? Number(config.baseOpacity) : 1);
+        setUppercase(Boolean(config.uppercase));
+        setActivePreset(null);
+        if (Array.isArray(config.captions) && config.captions.length > 0) {
+            setCaptions(config.captions);
+            setOriginalCaptions(config.captions);
+            setEditableText(config.captions.map((c) => c.text).join(' '));
+            setUseRemotionPreview(true);
+        }
+    }, [isOpen, existingSubtitles]);
+
     // Fetch word-level captions when modal opens
     useEffect(() => {
         if (!isOpen || !jobId || clipIndex === undefined) return;
@@ -116,10 +146,14 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         apiFetch(`/api/clip/${jobId}/${clipIndex}/transcript`)
             .then((res) => res.ok ? res.json() : null)
             .then((data) => {
-                if (data && data.captions && data.captions.length > 0) {
-                    setCaptions(data.captions);
-                    setOriginalCaptions(data.captions);
-                    setEditableText(data.captions.map(c => c.text).join(' '));
+                const persistedCaptions = existingSubtitles?.captions;
+                const nextCaptions = Array.isArray(persistedCaptions) && persistedCaptions.length > 0
+                    ? persistedCaptions
+                    : data?.captions;
+                if (nextCaptions && nextCaptions.length > 0) {
+                    setCaptions(nextCaptions);
+                    setOriginalCaptions(nextCaptions);
+                    setEditableText(nextCaptions.map(c => c.text).join(' '));
                     setDurationSec(data.durationSec || 30);
                     setUseRemotionPreview(true);
                 } else {
@@ -128,7 +162,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
             })
             .catch(() => setUseRemotionPreview(false))
             .finally(() => setCaptionsLoading(false));
-    }, [isOpen, jobId, clipIndex]);
+    }, [isOpen, jobId, clipIndex, existingSubtitles]);
 
     // When user edits text, redistribute words across original timestamps
     const handleTextEdit = (newText) => {
@@ -187,7 +221,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     const fallbackPreviewStyle = {
         fontFamily: fontName,
         color: fontColor,
-        fontSize: '20px',
+        fontSize: `${fontSize}px`,
         fontWeight: 'bold',
         maxWidth: '85%',
         padding: '6px 12px',
@@ -345,6 +379,28 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             </select>
                         </div>
 
+                        {/* Font Size */}
+                        <div>
+                            <div className="flex justify-between mb-1">
+                                <span className="eyebrow">Font size</span>
+                                <span className="readout">{fontSize}px</span>
+                            </div>
+                            <input
+                                aria-label="Font size"
+                                type="range"
+                                min="10"
+                                max="80"
+                                step="1"
+                                value={fontSize}
+                                onChange={(e) => setFontSize(parseInt(e.target.value, 10))}
+                                className="w-full accent-[var(--color-accent)]"
+                            />
+                            <div className="flex justify-between">
+                                <span className="readout">Small</span>
+                                <span className="readout">Large</span>
+                            </div>
+                        </div>
+
                         {/* Text Color */}
                         <div>
                             <p className="eyebrow mb-2">Text color</p>
@@ -459,13 +515,15 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             // differs from what the transcript produced.
                             const textEdited = originalCaptions.length > 0
                                 && editableText.trim() !== originalCaptions.map((c) => c.text).join(' ').trim();
+                            const hasPersistedCaptions = Array.isArray(existingSubtitles?.captions)
+                                && existingSubtitles.captions.length > 0;
                             const styleOptions = {
                                 position, fontSize, fontName, fontColor, borderColor, borderWidth, bgColor, bgOpacity,
                                 // Karaoke burn (server-side ASS render)
                                 style, effect, animation, baseOpacity, uppercase, highlightColor,
                                 // Remotion data
                                 remotion: useRemotionPreview ? subtitleConfig : null,
-                                captions: textEdited ? captions : null,
+                                captions: (textEdited || hasPersistedCaptions) ? captions : null,
                             };
                             const bulkRunning = bulkProgress?.running;
                             return (
