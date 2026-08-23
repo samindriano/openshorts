@@ -1,95 +1,48 @@
-"""Ask Gemini which layout a video needs, once per video.
+"""Ask the selected clip-analysis AI which layout a video needs, once per video.
 
-The four previous attempts at this problem asked the model (or a pixel
-heuristic) to MEASURE something — edge density, MSER text density, what fraction
-of the duration had content on screen, what fraction of the width it spanned —
-and let thresholds turn that number into a routing decision. All four failed the
-same way: they could not separate a spreadsheet from a corner scoreboard.
-
-This asks for the decision itself. Measured over the 48-clip corpus against
-hand-checked labels (`labels-layout.json` in the reframe-testing skill), three
-runs:
-
-    run 1   45/48  94%   18/20 content found   1 false positive of 28
-    run 2   44/48  92%   17/20                 1 of 28
-    run 3   46/48  96%   18/20                 0 of 28
-
-Two clips out of 48 changed answer between runs. That matters because the
-earlier note in this repo said Gemini was too non-deterministic to build on —
-the same video scored 1% and 97% coverage on consecutive runs. The variance was
-in asking for a continuous measurement, not in the model: a categorical choice
-between closed options is stable.
-
-It samples FRAMES instead of uploading the video. Gemini bills video at ~300
-tokens per second, so an hour of source is ~1.08M tokens — past a 1M context
-window before it starts — and means pushing a 1-2GB upload to get back one word.
-This pipeline ingests hour-long podcasts, so that scales badly in exactly the
-normal case. Twelve stills cost ~3k tokens whatever the source runs to.
-
-Measured on the same 48 clips (whole video vs sampled frames):
-
-    whole video          94% / 92% / 96%    18,17,18 of 20 found
-    12 frames @ 640px    90% / 90%          15,16 of 20
-    12 frames @ 1024px   92%                17 of 20
-    24 frames @ 1024px   90%                16 of 20
-
-Resolution was the gap, not frame count: at 640px a spreadsheet is unreadable,
-and doubling the frames made it slightly worse rather than better. At 1024px the
-difference from sending the whole video sits inside the run-to-run variance the
-whole-video mode already has, at 2.2s per clip instead of ~15s.
-
-Off by default (``AUTO_LAYOUT=1``). A caller that already switched layouts on
-by hand wins: this only ever ADDS, so an explicit choice is never overridden.
+The picker samples frames instead of uploading the full source. That keeps the
+visual routing call small for hour-long podcasts and lets both Gemini and OpenAI
+use the same evidence. AUTO_LAYOUT remains opt-in and a failure always degrades
+to the existing default layout rather than breaking a clip job.
 """
 import json
 import os
 
+from ai_provider import normalize_provider, spec_for
+
 # AUTO_LAYOUT=1 decides and applies. AUTO_LAYOUT=shadow decides, logs, and
 # applies NOTHING: the render is byte-for-byte what it would have been.
-#
-# Shadow exists because everything measured about this picker was measured on 48
-# YouTube clips chosen by hand, and the material users actually upload is a
-# different distribution nobody has looked at. A week of shadow answers "what
-# does it say about OUR videos" for 0.002 USD and ~2s per video, with no way to
-# damage a clip somebody paid for.
 _MODE = os.environ.get("AUTO_LAYOUT", "0").strip().lower()
 SHADOW = _MODE == "shadow"
 ENABLED = _MODE == "1" or SHADOW
 
-# 12 frames at 1024px wide. Both numbers are measured, not guessed: see above.
+# 12 frames at 1024px wide. Both values come from the upstream layout eval.
 SAMPLE_FRAMES = int(os.environ.get("LAYOUT_SAMPLE_FRAMES", "12"))
 SAMPLE_WIDTH = int(os.environ.get("LAYOUT_SAMPLE_WIDTH", "1024"))
 
-# What each decision turns on. Keys match the layout names in the prompt.
 DECISION_FLAGS = {
     "none": [],
     "screencast": ["screencast_layout"],
     "split": ["split_layout", "active_speaker"],
 }
-
 VALID = set(DECISION_FLAGS)
 
 
 def _module_flags(decision):
-    """Modules to enable for a decision, ignoring anything unrecognised."""
     return DECISION_FLAGS.get(str(decision or "none").strip().lower(), [])
 
 
 def apply(decision):
-    """Switch on the modules a decision needs. Returns the modules touched.
-
-    Deliberately additive: an operator who set SPLIT_LAYOUT=1 for a job wants
-    stacking regardless of what the model thinks, and a model that says "none"
-    must not quietly undo that.
-    """
+    """Switch on the modules a decision needs without undoing manual choices."""
     import active_speaker
     import screencast_layout
     import split_layout
 
-    modules = {"split_layout": split_layout,
-               "screencast_layout": screencast_layout,
-               "active_speaker": active_speaker}
-
+    modules = {
+        "split_layout": split_layout,
+        "screencast_layout": screencast_layout,
+        "active_speaker": active_speaker,
+    }
     touched = []
     for name in _module_flags(decision):
         module = modules.get(name)
@@ -117,10 +70,11 @@ def sample_frames(video_path, n=None, width=None):
             if not ok:
                 continue
             h, w = frame.shape[:2]
-            scaled = cv2.resize(frame, (width, max(2, int(h * width / w))),
-                                interpolation=cv2.INTER_AREA)
-            ok, buf = cv2.imencode(".jpg", scaled,
-                                   [cv2.IMWRITE_JPEG_QUALITY, 80])
+            scaled = cv2.resize(
+                frame, (width, max(2, int(h * width / w))),
+                interpolation=cv2.INTER_AREA)
+            ok, buf = cv2.imencode(
+                ".jpg", scaled, [cv2.IMWRITE_JPEG_QUALITY, 80])
             if ok:
                 out.append(buf.tobytes())
     finally:
@@ -128,46 +82,72 @@ def sample_frames(video_path, n=None, width=None):
     return out
 
 
-def pick(video_path, video_duration):
-    """The layout Gemini picks for this video, or "none" on any failure.
+def _pick_gemini(api_key, model_name, frames):
+    from google import genai
+    from google.genai import types as genai_types
+    import gemini_worker
 
-    Never raises: a missing answer has to degrade to today's routing rather
-    than break the job.
-    """
+    client = genai.Client(api_key=api_key)
+    parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
+             for b in frames]
+    response = client.models.generate_content(
+        model=model_name,
+        contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
+        config=genai_types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=gemini_worker.LayoutChoice,
+        ))
+    gemini_worker.raise_if_blocked(response)
+    parsed_obj = getattr(response, "parsed", None)
+    if parsed_obj is not None:
+        return parsed_obj.model_dump() if hasattr(parsed_obj, "model_dump") else parsed_obj
+    return json.loads(response.text) or {}
+
+
+def _pick_openai(api_key, model_name, frames):
+    import gemini_worker
+    import openai_worker
+
+    answer, _cost = openai_worker.run_image_stage(
+        api_key,
+        model_name,
+        gemini_worker.LAYOUT_CHOICE_PROMPT,
+        frames,
+        gemini_worker.LayoutChoice,
+        base_url=os.getenv("OPENAI_BASE_URL"),
+        reasoning_effort=os.getenv("OPENAI_REASONING_EFFORT", "none"),
+    )
+    return answer
+
+
+def pick(video_path, video_duration):
+    """The selected provider's layout decision, or ``none`` on any failure."""
     if not ENABLED:
         return "none"
-    api_key = os.getenv("GEMINI_API_KEY")
+
+    try:
+        provider = normalize_provider(os.getenv("AI_PROVIDER") or "gemini")
+    except ValueError as exc:
+        print(f"   ⚠️ {exc} — keeping the default layout.")
+        return "none"
+    spec = spec_for(provider)
+    api_key = os.getenv(spec.key_env)
     if not api_key:
         return "none"
+    model_name = os.getenv(spec.model_env) or spec.default_model
 
-    model_name = os.environ.get("GEMINI_MODEL") or 'gemini-3.1-flash-lite'
-    print("🎛️  Choosing a layout for this video…")
+    print(f"🎛️  Choosing a layout with {spec.label}/{model_name}…")
     try:
-        # Inside the try on purpose: the contract above is that this never
-        # raises, and an unimportable SDK is just one more reason to fall back.
-        from google import genai
-        from google.genai import types as genai_types
-        import gemini_worker
-
         frames = sample_frames(video_path)
         if not frames:
             print("   ⚠️ No readable frames — keeping the default layout.")
             return "none"
-
-        client = genai.Client(api_key=api_key)
-        parts = [genai_types.Part.from_bytes(data=b, mime_type="image/jpeg")
-                 for b in frames]
-        response = client.models.generate_content(
-            model=model_name,
-            contents=parts + [gemini_worker.LAYOUT_CHOICE_PROMPT],
-            config=genai_types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=gemini_worker.LayoutChoice,
-            ))
-        gemini_worker.raise_if_blocked(response)
-        answer = json.loads(response.text) or {}
-    except Exception as e:
-        print(f"   ⚠️ Layout choice failed ({e}) — keeping the default layout.")
+        if provider == "openai":
+            answer = _pick_openai(api_key, model_name, frames)
+        else:
+            answer = _pick_gemini(api_key, model_name, frames)
+    except Exception as exc:
+        print(f"   ⚠️ Layout choice failed ({exc}) — keeping the default layout.")
         return "none"
 
     decision = str(answer.get("layout", "none")).strip().lower()
@@ -177,7 +157,7 @@ def pick(video_path, video_duration):
 
     why = str(answer.get("why", ""))[:80]
     confidence = answer.get("confidence")
-    print(f"   🎬 Layout: {decision} (confianza {confidence}) — {why}")
+    print(f"   🎬 Layout: {decision} (confidence {confidence}) — {why}")
     return decision
 
 
@@ -186,9 +166,6 @@ def pick_and_apply(video_path, video_duration):
     decision = pick(video_path, video_duration)
 
     if SHADOW:
-        # One greppable line per job. Deliberately not routed through the
-        # analytics module: that one is opt-in and host-scoped, and a shadow
-        # run has to work on any deployment, including self-hosted.
         would = _module_flags(decision)
         print(f"[layout-shadow] decision={decision} "
               f"would_enable={','.join(would) if would else 'none'} "
