@@ -37,6 +37,11 @@ now use a subtle sage-slate tint, borders are less stark, and the orange accent
 is slightly muted. A restrained teal is reserved for informational state colors
 so the interface is not only white, gray, and orange.
 
+During processing, the divider between `Live Analysis` and `Generated Shorts`
+is adjustable on desktop. Drag the divider, or focus it and use the left/right
+arrow keys. The selected split is stored locally in the browser under
+`openshorts_analysis_pane_ratio`; mobile remains a stacked layout.
+
 ## Repository and branch setup
 
 - Upstream repository: `https://github.com/mutonby/openshorts.git`

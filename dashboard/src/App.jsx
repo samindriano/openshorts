@@ -184,6 +184,11 @@ const SESSION_KEY = 'openshorts_session';
 // Matches the self-host JOB_RETENTION_SECONDS default. A restore whose job was
 // already purged server-side fails gracefully and clears the saved session.
 const SESSION_MAX_AGE = 86400000; // 24 hours
+const ANALYSIS_PANE_RATIO_KEY = 'openshorts_analysis_pane_ratio';
+const ANALYSIS_PANE_MIN = 0.42;
+const ANALYSIS_PANE_MAX = 0.72;
+
+const clampAnalysisPaneRatio = (value) => Math.min(ANALYSIS_PANE_MAX, Math.max(ANALYSIS_PANE_MIN, value));
 
 // Mock polling function
 const pollJob = async (jobId) => {
@@ -238,6 +243,66 @@ function App() {
   const [jobId, setJobId] = useState(null);
   const [status, setStatus] = useState('idle'); // idle, processing, complete, error
   const [results, setResults] = useState(null);
+  // The processing view is intentionally user-adjustable: wide analysis
+  // footage benefits from more room on some screens, while the generated
+  // cards need more room on others. Keep the preference local to this browser.
+  const [analysisPaneRatio, setAnalysisPaneRatio] = useState(() => {
+    try {
+      const raw = localStorage.getItem(ANALYSIS_PANE_RATIO_KEY);
+      const stored = raw == null ? NaN : Number(raw);
+      return Number.isFinite(stored) ? clampAnalysisPaneRatio(stored) : 0.54;
+    } catch (_) {
+      return 0.54;
+    }
+  });
+  const [isResizingAnalysisPane, setIsResizingAnalysisPane] = useState(false);
+  const splitContainerRef = useRef(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(ANALYSIS_PANE_RATIO_KEY, String(analysisPaneRatio)); } catch (_) { /* ignore */ }
+  }, [analysisPaneRatio]);
+
+  useEffect(() => {
+    if (!isResizingAnalysisPane) return undefined;
+
+    const handlePointerMove = (event) => {
+      const container = splitContainerRef.current;
+      if (!container) return;
+      const rect = container.getBoundingClientRect();
+      if (rect.width <= 0) return;
+      setAnalysisPaneRatio(clampAnalysisPaneRatio((event.clientX - rect.left) / rect.width));
+    };
+    const stopResizing = () => setIsResizingAnalysisPane(false);
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResizing);
+    window.addEventListener('pointercancel', stopResizing);
+
+    return () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResizing);
+      window.removeEventListener('pointercancel', stopResizing);
+    };
+  }, [isResizingAnalysisPane]);
+
+  const handleAnalysisPanePointerDown = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    setIsResizingAnalysisPane(true);
+  };
+
+  const handleAnalysisPaneKeyDown = (event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    const direction = event.key === 'ArrowLeft' ? -1 : 1;
+    setAnalysisPaneRatio((current) => clampAnalysisPaneRatio(current + direction * 0.02));
+  };
   // Bulk subtitles: apply one style to every clip of the job (triggered from
   // within a clip's subtitle modal via "apply to all").
   const [bulkSub, setBulkSub] = useState({ running: false, current: 0, total: 0, errors: 0 });
@@ -1498,10 +1563,16 @@ function App() {
 
           {/* View: Processing / Results (Split View) */}
           {activeTab === 'dashboard' && (status === 'processing' || status === 'complete' || status === 'error') && (
-            <div className="h-full flex flex-col md:flex-row gap-6 p-5 sm:p-6 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade">
+            <div
+              ref={status === 'processing' ? splitContainerRef : null}
+              className={`h-full flex flex-col gap-6 md:gap-0 p-5 sm:p-6 overflow-y-auto md:overflow-y-hidden custom-scrollbar animate-fade ${status === 'processing' ? 'md:grid' : 'md:flex-row'}`}
+              style={status === 'processing' ? {
+                gridTemplateColumns: `minmax(0, ${analysisPaneRatio}fr) 20px minmax(0, ${1 - analysisPaneRatio}fr)`,
+              } : undefined}
+            >
 
               {/* Left Panel: Preview & Status */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
+              <div className={`${status === 'processing' ? 'w-full' : status === 'complete' ? 'w-full md:w-[30%] lg:w-[25%]' : 'w-full md:w-[55%] lg:w-[60%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 overflow-y-auto custom-scrollbar transition-all duration-700 ease-in-out`}>
                 <div className="mb-7 flex items-center justify-between">
                   <h2 className="text-base font-semibold text-ink flex items-center gap-2">
                     <Activity className={`text-brass ${status === 'processing' ? 'animate-pulse' : ''}`} size={18} />
@@ -1560,8 +1631,25 @@ function App() {
                 </div>
               </div>
 
+              {status === 'processing' && (
+                <div
+                  role="separator"
+                  tabIndex={0}
+                  aria-orientation="vertical"
+                  aria-label="Resize Live Analysis and Generated Shorts panels"
+                  aria-valuemin={Math.round(ANALYSIS_PANE_MIN * 100)}
+                  aria-valuemax={Math.round(ANALYSIS_PANE_MAX * 100)}
+                  aria-valuenow={Math.round(analysisPaneRatio * 100)}
+                  onPointerDown={handleAnalysisPanePointerDown}
+                  onKeyDown={handleAnalysisPaneKeyDown}
+                  className="hidden md:flex w-5 h-full items-center justify-center cursor-col-resize touch-none group/resize"
+                >
+                  <span className="w-1 h-16 rounded-full bg-rule2 group-hover/resize:bg-brass group-focus/resize:bg-brass transition-colors" />
+                </div>
+              )}
+
               {/* Right Panel: Results Grid */}
-              <div className={`${status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 transition-all duration-700 ease-in-out`}>
+              <div className={`${status === 'processing' ? 'w-full' : status === 'complete' ? 'w-full md:w-[70%] lg:w-[75%]' : 'w-full md:w-[45%] lg:w-[40%]'} md:h-full flex flex-col shrink-0 md:shrink card p-5 sm:p-6 transition-all duration-700 ease-in-out`}>
                 <h2 className="font-display text-2xl text-ink mb-6 flex flex-wrap items-center gap-2 shrink-0">
                   Generated Shorts
                   {results?.clips?.length > 0 && (
