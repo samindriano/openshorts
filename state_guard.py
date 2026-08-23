@@ -107,6 +107,19 @@ def _clip_suffix(base_name: str, index: int) -> str:
     return f"{base_name}_clip_{index + 1}.mp4"
 
 
+def _artifact_revision(filename: str, clean_suffix: str) -> Optional[int]:
+    """Revision carried by derivation prefixes, never by the source title.
+
+    Finance titles commonly contain long raw numbers (e.g. 1000000000000).
+    Those digits live inside the canonical suffix and must not be mistaken for
+    a render revision when deciding whether an old subtitle beats an edit.
+    """
+    if not isinstance(filename, str):
+        return None
+    prefix = filename[:-len(clean_suffix)] if clean_suffix and filename.endswith(clean_suffix) else filename
+    return _revision_number(prefix)
+
+
 def _candidate_files(job_dir: str, base_name: str, index: int) -> Iterable[str]:
     """Yield non-temp MP4 artifacts that belong to one canonical clip.
 
@@ -133,7 +146,7 @@ def _best_fallback(job_dir: str, base_name: str, index: int) -> Optional[str]:
     clean = _clip_suffix(base_name, index)
 
     def key(name: str) -> Tuple[int, int, int, str]:
-        rev = _revision_number(name)
+        rev = _artifact_revision(name, clean)
         try:
             mtime = os.stat(os.path.join(job_dir, name)).st_mtime_ns
         except OSError:
@@ -183,7 +196,7 @@ def _maybe_migrate_to_newer_artifact(
     clean = _clip_suffix(base_name, index)
     current_rev = _revision_number(clip.get("render_revision"))
     if current_rev is None:
-        current_rev = _revision_number(current_name)
+        current_rev = _artifact_revision(current_name, clean)
 
     # Unversioned derived files (e.g. legacy edited_*) are authoritative when
     # they still exist; guessing from another file's timestamp could roll them
@@ -194,7 +207,7 @@ def _maybe_migrate_to_newer_artifact(
     best = _best_fallback(job_dir, base_name, index)
     if not best or best == current_name:
         return None
-    best_rev = _revision_number(best)
+    best_rev = _artifact_revision(best, clean)
     if best_rev is None:
         return None
     if current_rev is not None and best_rev <= current_rev:
@@ -345,7 +358,7 @@ def repair_job(core: Any, job_id: str) -> bool:
             migrated = _maybe_migrate_to_newer_artifact(job_dir, base_name, index, meta_clip)
             if migrated:
                 meta_clip["video_url"] = f"/videos/{job_id}/{migrated}"
-                migrated_rev = _revision_number(migrated)
+                migrated_rev = _artifact_revision(migrated, _clip_suffix(base_name, index))
                 if migrated_rev is not None:
                     meta_clip["render_revision"] = str(migrated_rev)
                 changed = True
@@ -356,7 +369,7 @@ def repair_job(core: Any, job_id: str) -> bool:
         fallback = _best_fallback(job_dir, base_name, index)
         if fallback:
             meta_clip["video_url"] = f"/videos/{job_id}/{fallback}"
-            fallback_rev = _revision_number(fallback)
+            fallback_rev = _artifact_revision(fallback, _clip_suffix(base_name, index))
             if fallback_rev is not None:
                 meta_clip["render_revision"] = str(fallback_rev)
             changed = True
