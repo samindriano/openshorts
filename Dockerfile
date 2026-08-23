@@ -94,16 +94,18 @@ RUN groupadd -r appuser && useradd -r -g appuser -d /app -s /sbin/nologin appuse
 
 # Create directories including Ultralytics cache config. /app/.cache/huggingface
 # exists in-image (appuser-owned via the chown below) so a persistent volume
-# mounted there inherits writable ownership for the ASR model downloads.
-RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface /tmp/Ultralytics
-# Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache
-RUN chown -R appuser:appuser /app /tmp/Ultralytics
+# mounted there inherits writable ownership for the ASR model downloads. Keep
+# the YOLO weights in /models because Compose bind-mounts the source over /app.
+RUN mkdir -p /app/uploads /app/output /app/.cache/huggingface /tmp/Ultralytics /models
+# Fix permissions: /app for code/uploads, /tmp/Ultralytics for AI cache, and
+# /models for the bind-mount-safe reframe model.
+RUN chown -R appuser:appuser /app /tmp/Ultralytics /models
 
 # Switch to non-root user
 USER appuser
 
-# Pre-download YOLO model on build (now running as appuser)
-RUN python -c "from ultralytics import YOLO; YOLO('yolov8n.pt')"
+# Pre-download YOLO model outside the /app bind mount (now running as appuser)
+RUN python -c "from ultralytics import YOLO; YOLO('/models/yolov8n.pt')"
 
 # Expose FastAPI port
 EXPOSE 8000

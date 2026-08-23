@@ -4,6 +4,8 @@ services:
     container_name: openshorts-backend
     ports:
       - "8000:8000"
+    environment:
+      - YOLO_MODEL_PATH=/models/yolov8n.pt
     volumes:
       - .:/app
       - /app/__pycache__

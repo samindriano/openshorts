@@ -13,8 +13,9 @@ scope until the baseline is tested manually.
 
 - Upstream repository: `https://github.com/mutonby/openshorts.git`
 - Fork/origin: `https://github.com/samindriano/openshorts.git`
-- Local path: `C:\Users\Sam\OneDrive\Documents\Project\Clip\openshorts`
+- Local path: `D:\Projects\Clip\openshorts`
 - Baseline commit: `e0fa3fd591bbed235027a7b683fb3e19bdb0c683`
+- Baseline setup commit: `72ff6276b9fdac8192032f7dcbd293df8b6e45ab`
 - Working branch: `custom/tiktok-finance`
 - Upstream-compatible branch: `main`
 
@@ -35,7 +36,7 @@ Do project-specific work only on `custom/tiktok-finance`.
 The upstream self-hosted Docker Compose workflow is:
 
 ```powershell
-cd C:\Users\Sam\OneDrive\Documents\Project\Clip\openshorts
+cd D:\Projects\Clip\openshorts
 docker compose build
 docker compose up -d
 ```
@@ -50,8 +51,10 @@ The Compose file defines `backend` (`8000`), `frontend` (`5175`), and
 
 For the self-hosted Clip Generator baseline:
 
-- Required: `GEMINI_API_KEY`, entered in the dashboard Settings. It is needed
-  for Gemini moment analysis/AI features.
+- Required: `GEMINI_API_KEY`, stored in the local file
+  `D:\Projects\Clip\openshorts\.env`. The exact line is
+  `GEMINI_API_KEY=`. Fill the value locally before the first real clipping
+  run; never paste it into chat or commit `.env`.
 - Optional for clipping: no fal.ai, ElevenLabs, Upload-Post, or AWS key is
   required just to run the local dashboard, ingest/transcribe/reframe/render a
   clip, and review it locally.
@@ -64,10 +67,9 @@ For the self-hosted Clip Generator baseline:
   - `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_REGION`,
     `AWS_S3_BUCKET`, and `AWS_S3_PUBLIC_BUCKET` for optional S3 backup/gallery.
 
-No API keys were supplied, created, printed, or written to this repository.
-No `.env` file was created. Dashboard keys are intended by upstream to remain
-client-side/localStorage values; server-side `.env` values are optional
-runtime configuration.
+No API keys were supplied, created, or printed. The local `.env` was created
+from the documented example with optional cloud values left commented out and
+`GEMINI_API_KEY=` left empty. Git ignores this file.
 
 ## Runtime artifacts and storage
 
@@ -75,8 +77,9 @@ The Compose bind mounts keep runtime data beside this checkout:
 
 - Generated job output and clips: `output\\<job_id>\\`
 - Uploaded source files: `uploads\\`
-- Model/cache artifacts may be under `.cache\\` and YOLO `.pt` files may be
-  present in the runtime/build context.
+- Model/cache artifacts may be under `.cache\\`; the reframe model is stored in
+  the Docker image at `/models/yolov8n.pt`, outside the `/app` source bind
+  mount.
 
 The upstream `.gitignore` excludes `.env`, `output/`, `uploads/`, `.cache/`,
 `*.pt`, video extensions, and `*_metadata.json`.
@@ -102,6 +105,24 @@ removed approximately 1.68 GB of reclaimable cache records from the failed
 OpenShorts build. No images, volumes, containers, unrelated files, or broad
 prune operation were removed.
 
+## Repository relocation and runtime model fix
+
+The repository was moved from
+`C:\Users\Sam\OneDrive\Documents\Project\Clip\openshorts` to
+`D:\Projects\Clip\openshorts` because the source checkout stores uploads and
+generated output beside the application and C: had approximately 6 GiB free.
+The D: checkout preserves the full Git history, the `custom/tiktok-finance`
+branch, the `origin` and `upstream` remotes, and the local setup commit. The
+old source path was removed after validating that the D: checkout was complete
+and clean.
+
+The original Dockerfile downloaded `yolov8n.pt` under `/app` during image
+build, but Compose mounts the repository over `/app` at runtime, hiding that
+file. The maintainable resolution is to download the model during the image
+build to `/models/yolov8n.pt` and set the backend environment variable
+`YOLO_MODEL_PATH=/models/yolov8n.pt`. The existing reframe code already honors
+that variable, so no clip-selection or reframe algorithm was changed.
+
 ## Baseline verification
 
 Passed before the Docker build:
@@ -111,7 +132,7 @@ Passed before the Docker build:
 - `origin` and `upstream` remotes configured as listed above.
 - `main` and `upstream/main` matched at the baseline SHA.
 - Working branch created as `custom/tiktok-finance`.
-- Docker client `29.4.0`, Docker Compose `v5.1.1`, Git, Node, npm, and Python
+- Docker client `29.7.2`, Docker Compose `v5.1.1`, Git, Node, npm, and Python
   were present. Docker Desktop was started successfully initially.
 - `docker compose config --quiet` passed.
 - Static source inspection confirmed the declared Clip Generator pipeline:
@@ -154,8 +175,11 @@ around the failure.
 - Backend imports passed for FFmpeg bindings, faster-whisper, `google.genai`,
   PySceneDetect, TransNetV2, MediaPipe, and Ultralytics.
 - FFmpeg, the Anton font, and the Remotion bundle were operational in the
-  running containers. Backend Python `compileall` passed as root in the
-  container's anonymous `__pycache__` volume.
+  running containers. Backend Python AST parsing and `compileall` passed using
+  a temporary pycache prefix, without changing the source-mounted cache.
+- `YOLO_MODEL_PATH=/models/yolov8n.pt` was present in the backend; the file was
+  readable by `appuser` and `YOLO('/models/yolov8n.pt')` loaded successfully as
+  a detect model. This verifies the bind-mount-safe reframe model path.
 
 Remaining limitations and reported failures:
 
@@ -165,14 +189,12 @@ Remaining limitations and reported failures:
   option is incompatible with the repository's flat `eslint.config.js`. Direct
   `npx eslint .` also fails because ESLint 8.57.1 cannot resolve the config's
   `eslint/config` export. Tests and source were not changed to hide this.
-- The running Compose bind mount hides the `yolov8n.pt` downloaded during image
-  build at `/app/yolov8n.pt`; the Ultralytics package imports successfully, but
-  end-to-end YOLO reframe/face tracking was not claimed operational without
-  downloading a model into the checkout.
 - `GEMINI_API_KEY` is not configured. Gemini SDK import/readiness is present,
   but actual AI moment analysis and a full Clip Generator job were not run.
 - No real source video was uploaded, so Whisper inference, scene detection,
-  subtitles, reframe, and final clip output were not end-to-end exercised.
+  subtitle rendering, reframe/face tracking, and final clip output were not
+  end-to-end exercised. The installed/importable components and model
+  readiness were verified without starting a job.
 
 This is a reproducible vanilla runtime baseline for manual testing with the
 credential/model limitations above. No prompts, UI, n8n, TikTok, or affiliate
