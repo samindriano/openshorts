@@ -67,10 +67,13 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const { style, position } = config;
+  const isKaraoke = style.mode !== "classic";
 
   // Current time relative to composition start (sequence-relative frame)
   const currentTimeMs = blockStartMs + (frame / fps) * 1000;
-  const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
+  const activeIndex = isKaraoke
+    ? getActiveWordIndex(block.words, currentTimeMs)
+    : -1;
 
   const positionStyle = POSITION_MAP[position] ?? POSITION_MAP.bottom;
   const fontStack = getFontStack(style.fontFamily);
@@ -115,7 +118,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
             isActive={i === activeIndex}
             style={style}
             fontStack={fontStack}
-            animation={style.animation}
+            animation={isKaraoke ? style.animation : "none"}
             frame={frame}
             fps={fps}
             wordStartMs={word.startMs}
@@ -157,6 +160,18 @@ const WordSpan: React.FC<WordSpanProps> = ({
   let transform = "";
   let color = style.fontColor;
   let extraStyle: React.CSSProperties = {};
+
+  // Match the ASS renderer and dashboard preview for inactive karaoke words.
+  if (!isActive && style.baseOpacity != null && style.baseOpacity < 1) {
+    const m = /^#?([0-9a-fA-F]{6})$/.exec(style.fontColor || "#FFFFFF");
+    if (m) {
+      const scale = 0.35 + 0.65 * style.baseOpacity;
+      const [r, g, b] = [0, 2, 4].map((i) =>
+        Math.round(parseInt(m[1].slice(i, i + 2), 16) * scale)
+      );
+      color = `rgb(${r}, ${g}, ${b})`;
+    }
+  }
 
   if (isActive) {
     color = style.highlightColor;
@@ -218,6 +233,7 @@ const WordSpan: React.FC<WordSpanProps> = ({
         transform,
         display: "inline-block",
         transition: "none",
+        textTransform: style.uppercase ? "uppercase" : "none",
         ...extraStyle,
       }}
     >

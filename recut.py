@@ -266,7 +266,7 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
                   reframe=False, output_format="auto", watermark=False,
                   captions_transcript=None, force_strategy=None,
                   crop_overrides=None, runner=None, renderer=None,
-                  watermarker=None, captioner=None):
+                  watermarker=None, captioner=None, subtitle_config=None):
     """Render a recut clip. Returns (served_filename, clean_filename).
 
     - ``input_path``/``segments``: the file to cut from and the times ON THAT
@@ -279,6 +279,9 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
       ``virtual_transcript``); when given and non-empty, captions are burned
       LAST onto a ``subtitled_<ts>_`` derivative, preserving the invariant
       that the clean file stays clean for later re-styling.
+    - ``subtitle_config``: the persisted public recipe. Passing it through is
+      what keeps a trim/reframe/edit from silently reverting to the automatic
+      caption look.
     - ``crop_overrides``: scene index -> crop centre as a fraction of the
       source width, for scenes the user framed by hand. Source path only, for
       the same reason as ``reframe``: the canonical file is already cropped, so
@@ -320,10 +323,24 @@ def perform_recut(*, input_path, segments, output_dir, clean_name,
         served_name = out_name
         if captions_transcript and captions_transcript.get("segments"):
             caption = captioner or _main_attr("auto_caption_clip")
-            captioned = caption(out_path, captions_transcript,
-                                0.0, total_duration(segments))
+            try:
+                captioned = caption(out_path, captions_transcript,
+                                    0.0, total_duration(segments),
+                                    subtitle_config=subtitle_config)
+            except TypeError as exc:
+                # Keep the small injected captioner seam backward compatible;
+                # production main.auto_caption_clip accepts the recipe.
+                if "subtitle_config" not in str(exc):
+                    raise
+                captioned = caption(out_path, captions_transcript,
+                                    0.0, total_duration(segments))
             if captioned:
-                served_name = os.path.basename(captioned)
+                # New captioners return an artifact so state can be persisted;
+                # injected legacy captioners may still return a path.
+                caption_path = (captioned.get("path")
+                                if isinstance(captioned, dict) else captioned)
+                if caption_path:
+                    served_name = os.path.basename(caption_path)
         return served_name, out_name
     finally:
         if os.path.exists(work_path):

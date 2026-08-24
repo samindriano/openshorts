@@ -15,6 +15,7 @@ app_module = pytest.importorskip("app")
 _strip_burned_captions = app_module._strip_burned_captions
 _strip_burned_hook = app_module._strip_burned_hook
 _canonical_clip_file = app_module._canonical_clip_file
+_current_clip_filename = app_module._current_clip_filename
 
 
 def _touch(directory, name, mtime=None):
@@ -63,6 +64,16 @@ class TestLayerChain:
 
 
 class TestCanonicalClipFile:
+    def test_explicit_current_pointer_beats_newer_legacy_derivative(self, tmp_path):
+        now = time.time()
+        _touch(tmp_path, CLEAN, mtime=now - 90)
+        older_current = f"subtitled_100_{CLEAN}"
+        newer_legacy = f"subtitled_200_{CLEAN}"
+        _touch(tmp_path, older_current, mtime=now - 60)
+        _touch(tmp_path, newer_legacy, mtime=now)
+        clip = {"video_url": f"/videos/job/{older_current}"}
+        assert _current_clip_filename(str(tmp_path), clip, "base", 0) == older_current
+
     def test_captioned_hook_chain_resolves(self, tmp_path):
         now = time.time()
         _touch(tmp_path, CLEAN, mtime=now - 60)

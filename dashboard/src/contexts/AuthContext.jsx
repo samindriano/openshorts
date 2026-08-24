@@ -9,6 +9,7 @@ import { getApiUrl } from '../config';
 import { apiFetch, apiJson, getToken, setToken, clearToken } from '../lib/api';
 import { track } from '../lib/analytics';
 import { report as reportAttribution } from '../lib/attribution';
+import { DEFAULT_SUBTITLE_OPTIONS } from '../lib/subtitleRequest';
 
 const AuthContext = createContext(null);
 export const useAuth = () => useContext(AuthContext);
@@ -19,6 +20,7 @@ export function AuthProvider({ children }) {
     googleAuthEnabled: false,
     gemini_configured: false,
     openai_configured: false,
+    subtitleDefaults: DEFAULT_SUBTITLE_OPTIONS,
   });
   const [me, setMe] = useState(null);           // /api/me payload, or null when signed out
   const [loading, setLoading] = useState(true);
@@ -145,6 +147,7 @@ export function AuthProvider({ children }) {
     serverGeminiConfigured: !config.billingEnabled && config.gemini_configured === true,
     serverOpenaiConfigured: !config.billingEnabled && config.openai_configured === true,
     jobRetentionSeconds: config.jobRetentionSeconds || null,
+    subtitleDefaults: config.subtitleDefaults || DEFAULT_SUBTITLE_OPTIONS,
     loading,
     signingIn,
     user: me?.user || null,

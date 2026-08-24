@@ -882,7 +882,8 @@ def finalize_clip_passthrough(input_video, final_output_video):
     return True
 
 
-def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
+def auto_caption_clip(clip_path, transcript, clip_start, clip_end,
+                      subtitle_config=None):
     """Burn the default caption style onto a finished clip.
 
     Captions are mandatory for short-form to land, but they were opt-in behind a
@@ -894,9 +895,12 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
     the untouched original stays on disk and re-styling from the modal replaces
     the captions instead of burning a second layer over them.
 
-    Returns the captioned path, or None when captions were skipped (silent
-    video, no words in range, AUTO_CAPTIONS=0, or any failure — a caption
-    problem must never cost the user the clip they already paid for).
+    Returns a render artifact ``{"path", "subtitle_config", "revision"}``,
+    or None when captions were skipped (silent video, no words in range,
+    AUTO_CAPTIONS=0, or any failure — a caption problem must never cost the
+    user the clip they already paid for). The structured result is important:
+    callers must persist the exact file and recipe instead of guessing the
+    newest derivative from a directory listing.
     """
     if os.environ.get("AUTO_CAPTIONS", "1").strip() == "0":
         return None
@@ -904,10 +908,35 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
         return None  # silent video: nothing to caption
     try:
         import subtitles as _subs
-        style = _subs.AUTO_CAPTION_STYLE
+        recipe = _subs.canonical_subtitle_config(subtitle_config)
+        style = _subs.subtitle_render_options(recipe)
+        render_style, render_effect = _subs.resolve_render_style(
+            recipe["style"], recipe["animation"], recipe["effect"])
         output_dir = os.path.dirname(clip_path)
         stem = os.path.basename(clip_path)
         generation_id = time.time_ns()
+
+        render_transcript = transcript
+        if recipe.get("captions"):
+            edited = [
+                {"word": " " + str(word.get("text", "")).strip(),
+                 "start": max(0.0, float(word.get("startMs", 0)) / 1000.0),
+                 "end": max(0.0, float(word.get("endMs", 0)) / 1000.0)}
+                for word in recipe["captions"]
+                if str(word.get("text", "")).strip()
+                and float(word.get("endMs", 0)) > float(word.get("startMs", 0))
+            ]
+            if edited:
+                render_transcript = {
+                    "language": (transcript or {}).get("language", "en"),
+                    "segments": [{
+                        "start": edited[0]["start"],
+                        "end": edited[-1]["end"],
+                        "text": " ".join(w["word"].strip() for w in edited),
+                        "words": edited,
+                    }],
+                }
+                clip_start, clip_end = 0.0, edited[-1]["end"]
         # The output name MUST stay exactly "subtitled_<ts>_<clip filename>":
         # the modal's walk-back and _canonical_clip_file both reconstruct the
         # clean original from it, so trimming the stem here would orphan the
@@ -930,18 +959,26 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
         # Unique per clip, not just per second: clips render in parallel
         # (CLIP_WORKERS), so a bare timestamp would collide and let one clip
         # burn another's captions.
+        subtitle_ext = "ass" if render_style == "karaoke" else "srt"
         ass_path = os.path.join(
-            output_dir, f"autosubs_{generation_id}_{uuid.uuid4().hex[:8]}.ass")
+            output_dir, f"autosubs_{generation_id}_{uuid.uuid4().hex[:8]}.{subtitle_ext}")
         out_path = os.path.join(output_dir, f"subtitled_{generation_id}_{stem}")
 
-        if not _subs.generate_ass(
-                transcript, clip_start, clip_end, ass_path,
+        if render_style == "karaoke":
+            generated = _subs.generate_ass(
+                render_transcript, clip_start, clip_end, ass_path,
                 max_chars=style["max_chars"], max_duration=style["max_duration"],
                 alignment=style["alignment"], fontsize=style["font_size"],
                 font_name=style["font_name"], font_color=style["font_color"],
                 border_color=style["border_color"], border_width=style["border_width"],
-                highlight_color=style["highlight_color"], effect=style["effect"],
-                base_opacity=style["base_opacity"], uppercase=style["uppercase"]):
+                highlight_color=style["highlight_color"], effect=render_effect,
+                base_opacity=style["base_opacity"], uppercase=style["uppercase"],
+                bg_color=style["bg_color"], bg_opacity=style["bg_opacity"])
+        else:
+            generated = _subs.generate_srt(
+                render_transcript, clip_start, clip_end, ass_path,
+                max_chars=style["max_chars"], max_duration=style["max_duration"])
+        if not generated:
             print("   ℹ️ No words in range — clip ships without captions.")
             return None
 
@@ -949,9 +986,15 @@ def auto_caption_clip(clip_path, transcript, clip_start, clip_end):
             clip_path, ass_path, out_path,
             alignment=style["alignment"], fontsize=style["font_size"],
             font_name=style["font_name"], font_color=style["font_color"],
-            border_color=style["border_color"], border_width=style["border_width"])
+            border_color=style["border_color"], border_width=style["border_width"],
+            bg_color=style["bg_color"], bg_opacity=style["bg_opacity"])
         print(f"   💬 Captions burned: {os.path.basename(out_path)}")
-        return out_path
+        return {
+            "path": out_path,
+            "server_file": os.path.basename(out_path),
+            "subtitle_config": recipe,
+            "revision": str(generation_id),
+        }
     except Exception as e:
         print(f"   ⚠️ Auto-captions failed ({type(e).__name__}: {e}) — "
               f"delivering the clip without them.")
@@ -1610,8 +1653,23 @@ if __name__ == '__main__':
                         if hooked:
                             deliver_path, clip['auto_hook'] = hooked
                     if success:
-                        auto_caption_clip(deliver_path, transcript, start, end)
-                        print(f"   ✅ Clip {i+1} ready: {clip_final_path}")
+                        captioned = auto_caption_clip(
+                            deliver_path, transcript, start, end)
+                        if captioned:
+                            deliver_path = captioned["path"]
+                            clip.update({
+                                "video_url": f"/videos/{os.path.basename(os.path.normpath(output_dir))}/{os.path.basename(deliver_path)}",
+                                "server_file": os.path.basename(deliver_path),
+                                "render_revision": captioned["revision"],
+                                "subtitle_config": captioned["subtitle_config"],
+                            })
+                        else:
+                            clip.update({
+                                "video_url": f"/videos/{os.path.basename(os.path.normpath(output_dir))}/{os.path.basename(deliver_path)}",
+                                "server_file": os.path.basename(deliver_path),
+                                "subtitle_config": None,
+                            })
+                        print(f"   ✅ Clip {i+1} ready: {os.path.basename(deliver_path)}")
                     return success
                 finally:
                     if os.path.exists(clip_temp_path):
@@ -1629,11 +1687,11 @@ if __name__ == '__main__':
                     except Exception as e:
                         print(f"   ❌ Clip {i+1} failed: {type(e).__name__}: {e}")
 
-            # Persist per-clip render results added by the workers (auto_hook)
-            # so the editor can see what is already burned into each clip.
-            if any('auto_hook' in c for c in shorts):
-                with open(metadata_file, 'w') as f:
-                    json.dump(clips_data, f, indent=2)
+            # Persist every worker's exact current file and subtitle recipe.
+            # The completion handler must not infer the current artifact from
+            # mtime: a late FFmpeg write or an older restyle is not ownership.
+            with open(metadata_file, 'w') as f:
+                json.dump(clips_data, f, indent=2)
 
     # Clean up original if requested
     if args.url and not args.keep_original and os.path.exists(input_video):

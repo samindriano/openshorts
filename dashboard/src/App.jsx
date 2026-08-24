@@ -27,6 +27,7 @@ import { useAuth } from './contexts/AuthContext';
 import { apiFetch, apiJson, QuotaError } from './lib/api';
 import { track } from './lib/analytics';
 import { getProviderAvailability } from './lib/providerAvailability';
+import { serializeSubtitleRequest } from './lib/subtitleRequest';
 
 // Enhanced "Encryption" using XOR + Base64 with a Salt
 // This is better than plain Base64 but still client-side.
@@ -211,6 +212,7 @@ function App() {
     jobRetentionSeconds,
     serverGeminiConfigured,
     serverOpenaiConfigured,
+    subtitleDefaults,
   } = useAuth();
   const [showLogin, setShowLogin] = useState(false);
   const [showTopUp, setShowTopUp] = useState(false);
@@ -483,6 +485,9 @@ function App() {
       clips[index] = {
         ...clips[index],
         video_url: data.new_video_url,
+        render_revision: data.revision || null,
+        subtitle_config: Object.prototype.hasOwnProperty.call(data, 'subtitle_config')
+          ? data.subtitle_config : null,
         start: data.start,
         end: data.end,
         recipe: data.recipe,
@@ -494,7 +499,13 @@ function App() {
       return {
         ...prev,
         clips: prev.clips.map((c) => (c.index === index
-          ? { ...c, server_file: newFile, active_layers: null }
+          ? {
+              ...c,
+              server_file: newFile,
+              active_layers: null,
+              ...(Object.prototype.hasOwnProperty.call(data, 'subtitle_config')
+                ? { subtitle_config: data.subtitle_config } : {}),
+            }
           : c)),
       };
     });
@@ -506,7 +517,12 @@ function App() {
       delete next[index];
       return next;
     });
-    handleClipStateChange(index, { activeLayers: null, serverVideoFile: newFile });
+    handleClipStateChange(index, {
+      activeLayers: null,
+      serverVideoFile: newFile,
+      subtitleConfig: Object.prototype.hasOwnProperty.call(data, 'subtitle_config')
+        ? data.subtitle_config : null,
+    });
   };
 
   // Reopen an archived project from the History tab: the backend re-downloads
@@ -533,30 +549,22 @@ function App() {
     setBulkSub({ running: true, completed: false, current: 0, total, errors: 0, error: null });
     let errors = 0;
     let firstError = null;
+    // Snapshot each destination's current server file before the loop. The
+    // state setter below is asynchronous; using results directly on the next
+    // iteration could otherwise send a stale file and restyle the wrong layer.
+    const currentFiles = clips.map((clip) =>
+      (clip.video_url || '').split('/').pop() || null);
     for (let i = 0; i < total; i++) {
       setBulkSub({ running: true, completed: false, current: i + 1, total, errors, error: firstError });
       try {
         const res = await apiFetch('/api/subtitle', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            job_id: jobId,
-            clip_index: i,
-            position: options.position,
-            font_size: options.fontSize,
-            font_name: options.fontName,
-            font_color: options.fontColor,
-            border_color: options.borderColor,
-            border_width: options.borderWidth,
-            bg_color: options.bgColor,
-            bg_opacity: options.bgOpacity,
-            style: options.style || 'classic',
-            animation: options.animation || 'none',
-            highlight_color: options.highlightColor || '#FFD700',
-            effect: options.effect || 'none',
-            base_opacity: options.baseOpacity ?? 1.0,
-            uppercase: options.uppercase || false,
-          }),
+          body: JSON.stringify(serializeSubtitleRequest(
+            { ...options, defaults: subtitleDefaults },
+            { job_id: jobId, clip_index: i, input_filename: currentFiles[i] },
+            false,
+          )),
         });
         if (!res.ok) {
           errors++;
@@ -585,6 +593,7 @@ function App() {
               };
               return { ...prev, clips: nextClips };
             });
+            currentFiles[i] = data.server_file || (data.new_video_url || '').split('/').pop();
           }
         }
       } catch (e) {
@@ -1905,6 +1914,7 @@ function App() {
                           onBulkSubtitle={handleBulkSubtitles}
                           clipCount={results.clips.length}
                           bulkProgress={bulkSub}
+                          subtitleDefaults={subtitleDefaults}
                         />
                       ))}
                     </div>

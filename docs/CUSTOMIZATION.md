@@ -10,6 +10,28 @@ Gemini/OpenAI clip analysis, output-quality and durable editor changes, and the
 local light-neutral dashboard palette. Upstream behavior, provider boundaries,
 and publishing safeguards remain explicit rather than being silently changed.
 
+## Subtitle recipe and current-file contract
+
+Subtitle styling is one flat camelCase recipe, exposed as
+`GET /api/config.subtitleDefaults` and stored per clip as `subtitle_config`.
+`video_url`/`server_file` and `render_revision` are the durable pointer to the
+exact current artifact. A directory mtime scan is only a legacy fallback when
+that pointer is absent or invalid.
+
+The initial automatic caption burn persists that recipe and its generated file.
+The single-clip modal and Apply All use the same request serializer; Apply All
+keeps each destination's current file and asks the backend to use that clip's
+own transcript (`words: null`). Edited words are sent only by the single-clip
+path and are persisted in the recipe.
+
+Classic subtitles are a uniform-color mode. Karaoke/highlight behavior is an
+explicit mode selected in the modal and is represented in the Remotion preview
+with `style.mode`; no generic API transport helper silently changes classic to
+karaoke. Edit, hook, trim, reframe, restart recovery, download, and restore
+preserve the same recipe/current-file relationship. Caption layers are always
+walked back to the clean base before a replacement burn, so repeated applies do
+not stack visible subtitles.
+
 ## Dashboard palette update
 
 The dashboard now has a palette-only light-neutral treatment on

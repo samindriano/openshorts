@@ -487,6 +487,19 @@ def _clip_url_points_to_file(output_dir, video_url):
     return bool(filename) and os.path.isfile(path) and os.path.getsize(path) > 0
 
 
+def _current_clip_filename(output_dir, clip, base_name, index):
+    """Resolve the stored current file, using mtime only for legacy metadata.
+
+    A derived filename is an explicit state pointer. Choosing the newest file
+    in a directory is only a recovery fallback for old jobs that predate that
+    pointer; it is not safe after two quick subtitle applies or a hook/reframe.
+    """
+    stored = os.path.basename((clip or {}).get("video_url", ""))
+    if stored and _clip_url_points_to_file(output_dir, stored):
+        return stored
+    return _canonical_clip_file(output_dir, base_name, index)
+
+
 def _strip_burned_captions(output_dir, filename):
     """Walk ``subtitled_<ts>_`` prefixes back to the file without burned captions.
 
@@ -514,7 +527,7 @@ def _strip_burned_hook(output_dir, filename):
 
 
 def _reapply_captions(job_id, clip_index, video_path):
-    """Re-burn the default captions onto a freshly derived file.
+    """Re-burn the persisted caption recipe onto a freshly derived file.
 
     Captions must always be the LAST layer. Editing or hooking a clip that
     already had them burned in produced `edited_subtitled_<...>`, and the next
@@ -536,6 +549,9 @@ def _reapply_captions(job_id, clip_index, video_path):
             return None
         clip = clips[clip_index]
         import main as _main
+        from subtitles import canonical_subtitle_config
+        subtitle_config = canonical_subtitle_config(
+            clip.get("subtitle_config"))
         # A recut clip is a concatenation of source segments, so the flat
         # start..end window is wrong for it — caption against the clip-relative
         # remapped transcript instead (same trick /api/subtitle uses).
@@ -544,12 +560,32 @@ def _reapply_captions(job_id, clip_index, video_path):
             v_transcript = recut.virtual_transcript(transcript, recipe_segments)
             return _main.auto_caption_clip(
                 video_path, v_transcript, 0.0,
-                recut.total_duration(recipe_segments))
+                recut.total_duration(recipe_segments),
+                subtitle_config=subtitle_config)
         return _main.auto_caption_clip(video_path, transcript,
-                                       clip['start'], clip['end'])
+                                       clip['start'], clip['end'],
+                                       subtitle_config=subtitle_config)
     except Exception as e:
         print(f"⚠️  Could not re-apply captions to {video_path}: {e}")
         return None
+
+
+def _caption_artifact_path(result):
+    """Accept the structured caption result and old path-only test seams."""
+    if isinstance(result, dict):
+        return result.get("path")
+    return result
+
+
+def _caption_artifact_recipe(result):
+    if isinstance(result, dict):
+        return result.get("subtitle_config"), result.get("revision")
+    return None, None
+
+
+def _revision_from_filename(filename):
+    match = re.match(r"^subtitled_(\d+)_", os.path.basename(filename or ""))
+    return match.group(1) if match else None
 
 
 def _recover_jobs_from_disk():
@@ -578,10 +614,9 @@ def _recover_jobs_from_disk():
             base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
             clips = data.get('shorts', [])
             for i, clip in enumerate(clips):
-                if not _clip_url_points_to_file(job_path, clip.get('video_url')):
-                    clip['video_url'] = (
-                        f"/videos/{job_id}/"
-                        f"{_canonical_clip_file(job_path, base_name, i)}")
+                clip['video_url'] = (
+                    f"/videos/{job_id}/"
+                    f"{_current_clip_filename(job_path, clip, base_name, i)}")
             owner = None
             owner_path = os.path.join(job_path, ".owner")
             if os.path.exists(owner_path):
@@ -1489,7 +1524,8 @@ async def run_job(job_id, job_data):
                 cost_analysis = data.get('cost_analysis')
 
                 for i, clip in enumerate(clips):
-                     clip_filename = _canonical_clip_file(output_dir, base_name, i)
+                     clip_filename = _current_clip_filename(
+                         output_dir, clip, base_name, i)
                      clip['video_url'] = f"/videos/{job_id}/{clip_filename}"
                 
                 jobs[job_id]['result'] = {
@@ -1523,6 +1559,9 @@ async def get_config():
         "billingEnabled": BILLING_ENABLED,
         "googleAuthEnabled": bool(BILLING_ENABLED and cloud and cloud.settings.google_auth_enabled),
         "jobRetentionSeconds": JOB_RETENTION_SECONDS,
+        # Public visual defaults only; never include provider credentials or
+        # other environment values in this response.
+        "subtitleDefaults": dict(CANONICAL_SUBTITLE_DEFAULTS),
     }
     # Self-host users may rely on provider keys mounted into the server
     # environment. Expose availability only as booleans; never expose the key
@@ -2136,10 +2175,9 @@ async def restore_project(job_id: str, request: Request):
         base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
         clips = data.get('shorts', [])
         for i, clip in enumerate(clips):
-            if not _clip_url_points_to_file(job_dir, clip.get('video_url')):
-                clip['video_url'] = (
-                    f"/videos/{job_id}/"
-                    f"{_canonical_clip_file(job_dir, base_name, i)}")
+            clip['video_url'] = (
+                f"/videos/{job_id}/"
+                f"{_current_clip_filename(job_dir, clip, base_name, i)}")
         jobs[job_id] = {
             'status': 'completed',
             'logs': ["♻️ Project restored from your library."],
@@ -2186,7 +2224,9 @@ async def _ensure_job_files(job_id: str, request: Request) -> bool:
 
 from editor import VideoEditor
 from subtitles import (generate_srt, generate_ass, burn_subtitles,
-                       generate_srt_from_video, resolve_render_style)
+                       generate_srt_from_video, resolve_render_style,
+                       canonical_subtitle_config, subtitle_render_options,
+                       CANONICAL_SUBTITLE_DEFAULTS)
 from hooks import add_hook_to_video
 from translate import translate_video, get_supported_languages
 from thumbnail import analyze_video_for_titles, refine_titles, generate_thumbnail, generate_youtube_description
@@ -2228,6 +2268,8 @@ async def edit_clip(
 
     try:
         # Resolve Input Path: Prefer explict input_filename from frontend (chaining edits)
+        clip_state = job['result']['clips'][req.clip_index]
+        existing_subtitle_config = clip_state.get('subtitle_config')
         if req.input_filename:
             # Security: Ensure just a filename, no paths
             safe_name = os.path.basename(req.input_filename)
@@ -2330,14 +2372,26 @@ async def edit_clip(
             recap = await loop.run_in_executor(
                 None, _reapply_captions, req.job_id, req.clip_index, output_path)
             if recap:
-                edited_filename = os.path.basename(recap)
+                edited_filename = os.path.basename(_caption_artifact_path(recap))
+                existing_subtitle_config, caption_revision = _caption_artifact_recipe(recap)
+            else:
+                existing_subtitle_config, caption_revision = None, None
+        else:
+            existing_subtitle_config, caption_revision = None, None
 
         new_video_url = f"/videos/{req.job_id}/{edited_filename}"
+        revision = caption_revision or f"edit-{time.time_ns()}"
+        render_update = {
+            "video_url": new_video_url,
+            "server_file": edited_filename,
+            "render_revision": revision,
+            "subtitle_config": existing_subtitle_config,
+        }
 
         # Persist the new current file like /api/subtitle does: in-memory job
         # result + metadata.json, so reload/recovery/re-archive see this version.
         if req.clip_index < len(job['result']['clips']):
-            job['result']['clips'][req.clip_index]['video_url'] = new_video_url
+            job['result']['clips'][req.clip_index].update(render_update)
         try:
             meta_files = glob.glob(os.path.join(OUTPUT_DIR, req.job_id, "*_metadata.json"))
             if meta_files:
@@ -2345,7 +2399,7 @@ async def edit_clip(
                     meta = json.load(f)
                 shorts = meta.get('shorts', [])
                 if req.clip_index < len(shorts):
-                    shorts[req.clip_index]['video_url'] = new_video_url
+                    shorts[req.clip_index].update(render_update)
                     meta['shorts'] = shorts
                     with open(meta_files[0], 'w') as f:
                         json.dump(meta, f, indent=4)
@@ -2359,6 +2413,9 @@ async def edit_clip(
         return {
             "success": True,
             "new_video_url": new_video_url,
+            "server_file": edited_filename,
+            "revision": revision,
+            "subtitle_config": existing_subtitle_config,
             "edit_plan": plan
         }
 
@@ -2379,20 +2436,20 @@ class CaptionWordIn(BaseModel):
 class SubtitleRequest(BaseModel):
     job_id: str
     clip_index: int
-    position: str = "bottom" # top, middle, bottom
-    font_size: int = 16
-    font_name: str = "Verdana"
-    font_color: str = "#FFFFFF"
-    border_color: str = "#000000"
-    border_width: int = 2
-    bg_color: str = "#000000"
-    bg_opacity: float = 0.0
-    style: str = "classic"  # classic (uniform color) or karaoke (word highlight)
-    animation: str = "none"  # none | pop | word-highlight | karaoke
-    highlight_color: str = "#FFD700"
-    effect: str = "none"  # none | glow | pop | box (karaoke only)
-    base_opacity: float = 1.0  # opacity of non-active words (dimmed modern look)
-    uppercase: bool = False
+    position: str = CANONICAL_SUBTITLE_DEFAULTS["position"]
+    font_size: int = CANONICAL_SUBTITLE_DEFAULTS["fontSize"]
+    font_name: str = CANONICAL_SUBTITLE_DEFAULTS["fontName"]
+    font_color: str = CANONICAL_SUBTITLE_DEFAULTS["fontColor"]
+    border_color: str = CANONICAL_SUBTITLE_DEFAULTS["borderColor"]
+    border_width: int = CANONICAL_SUBTITLE_DEFAULTS["borderWidth"]
+    bg_color: str = CANONICAL_SUBTITLE_DEFAULTS["bgColor"]
+    bg_opacity: float = CANONICAL_SUBTITLE_DEFAULTS["bgOpacity"]
+    style: str = CANONICAL_SUBTITLE_DEFAULTS["style"]
+    animation: str = CANONICAL_SUBTITLE_DEFAULTS["animation"]
+    highlight_color: str = CANONICAL_SUBTITLE_DEFAULTS["highlightColor"]
+    effect: str = CANONICAL_SUBTITLE_DEFAULTS["effect"]
+    base_opacity: float = CANONICAL_SUBTITLE_DEFAULTS["baseOpacity"]
+    uppercase: bool = CANONICAL_SUBTITLE_DEFAULTS["uppercase"]
     input_filename: Optional[str] = None
     # User-edited caption words. When present, the burn uses them VERBATIM
     # instead of regenerating from the stored transcript — without this, text
@@ -2407,7 +2464,11 @@ def _subtitle_config_from_request(req: SubtitleRequest) -> dict:
     metadata/project state lets the modal reopen with the same controls and
     edited words instead of reconstructing defaults from the original transcript.
     """
-    config = {
+    captions = None if req.words is None else [
+        {"text": word.text, "startMs": word.startMs, "endMs": word.endMs}
+        for word in req.words
+    ]
+    return canonical_subtitle_config({
         "position": req.position,
         "fontSize": req.font_size,
         "fontName": req.font_name,
@@ -2422,13 +2483,7 @@ def _subtitle_config_from_request(req: SubtitleRequest) -> dict:
         "effect": req.effect,
         "baseOpacity": req.base_opacity,
         "uppercase": req.uppercase,
-    }
-    if req.words is not None:
-        config["captions"] = [
-            {"text": word.text, "startMs": word.startMs, "endMs": word.endMs}
-            for word in req.words
-        ]
-    return config
+    }, captions=captions)
 
 
 @app.get("/api/clip/{job_id}/{clip_index}/transcript")
@@ -2730,8 +2785,14 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
     reservation_id = await reserve_managed_action(
         request, rerender_minutes, req.job_id, "rerender")
 
+    saved_subtitle_config = clip.get('subtitle_config', '__missing__')
+    captions_enabled = req.reapply_captions and (
+        saved_subtitle_config == '__missing__' or saved_subtitle_config is not None)
+    subtitle_config = (canonical_subtitle_config(
+        None if saved_subtitle_config == '__missing__' else saved_subtitle_config)
+        if captions_enabled else None)
     v_transcript = (recut.virtual_transcript(transcript, segments)
-                    if req.reapply_captions else None)
+                    if captions_enabled else None)
 
     def run_recut():
         if fast:
@@ -2740,19 +2801,26 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
                 segments=recut.rebase_segments(
                     segments, canonical_range['start'], canonical_range['end']),
                 output_dir=output_dir, clean_name=clean_name,
-                reframe=False, captions_transcript=v_transcript)
+                reframe=False, captions_transcript=v_transcript,
+                subtitle_config=subtitle_config)
         return recut.perform_recut(
             input_path=source_path, segments=segments,
             output_dir=output_dir, clean_name=clean_name,
             reframe=True, output_format=data.get('output_format', 'auto'),
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript,
+            subtitle_config=subtitle_config)
 
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean_recut_name = await loop.run_in_executor(None, run_recut)
 
+        caption_applied = bool(captions_enabled and
+                               re.match(r'^subtitled_\d+_', served_name))
+        stored_subtitle_config = subtitle_config if caption_applied else None
+        revision = (_revision_from_filename(served_name)
+                    or f"recut-{time.time_ns()}")
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
                       "canonical_range": canonical_range}
@@ -2764,8 +2832,10 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
         new_start = min(s['start'] for s in segments)
         new_end = max(s['end'] for s in segments)
 
-        updates = {'video_url': new_video_url, 'start': new_start,
-                   'end': new_end, 'recipe': new_recipe}
+        updates = {'video_url': new_video_url, 'server_file': served_name,
+                   'render_revision': revision,
+                   'subtitle_config': stored_subtitle_config,
+                   'start': new_start, 'end': new_end, 'recipe': new_recipe}
         # Per-scene manual framing is keyed by scene indices of a specific cut;
         # this render neither applied it nor can it survive a changed cut, so
         # clear it rather than let /scenes serve stale overrides against the
@@ -2791,6 +2861,9 @@ async def _rerender_locked(req: RerenderRequest, request: Request, job):
             "start": new_start,
             "end": new_end,
             "duration": total,
+            "server_file": served_name,
+            "revision": revision,
+            "subtitle_config": stored_subtitle_config,
             "render_path": "fast" if fast else "source",
         }
     except Exception as e:
@@ -3084,8 +3157,14 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
 
     # Every default clip ships with burned captions; re-rendering without them
     # would silently hand back a caption-less file.
+    saved_subtitle_config = clip.get('subtitle_config', '__missing__')
+    captions_enabled = req.reapply_captions and (
+        saved_subtitle_config == '__missing__' or saved_subtitle_config is not None)
+    subtitle_config = (canonical_subtitle_config(
+        None if saved_subtitle_config == '__missing__' else saved_subtitle_config)
+        if captions_enabled else None)
     v_transcript = (recut.virtual_transcript(data.get('transcript') or {}, segments)
-                    if req.reapply_captions else None)
+                    if captions_enabled else None)
 
     base_name = os.path.basename(json_files[0]).replace('_metadata.json', '')
     # The CLEAN base name, exactly as /api/clip/rerender does — never the
@@ -3104,12 +3183,18 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             watermark=bool(job.get('watermark')),
             force_strategy=force_strategy,
             crop_overrides=overrides,
-            captions_transcript=v_transcript)
+            captions_transcript=v_transcript,
+            subtitle_config=subtitle_config)
 
     try:
         loop = asyncio.get_event_loop()
         served_name, _clean = await loop.run_in_executor(None, run)
 
+        caption_applied = bool(captions_enabled and
+                               re.match(r'^subtitled_\d+_', served_name))
+        stored_subtitle_config = subtitle_config if caption_applied else None
+        revision = (_revision_from_filename(served_name)
+                    or f"reframe-{time.time_ns()}")
         new_video_url = f"/videos/{req.job_id}/{served_name}"
         new_recipe = {"v": 1, "segments": segments,
                       "canonical_range": canonical_range}
@@ -3117,6 +3202,9 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             new_recipe["framing"] = framing
         updates = {
             'video_url': new_video_url,
+            'server_file': served_name,
+            'render_revision': revision,
+            'subtitle_config': stored_subtitle_config,
             'recipe': new_recipe,
             'crop_overrides': {str(k): v for k, v in overrides.items()},
         }
@@ -3141,6 +3229,9 @@ async def _reframe_locked(req: ReframeRequest, request: Request, job, overrides)
             "start": min(s['start'] for s in segments),
             "end": max(s['end'] for s in segments),
             "framed_scenes": sorted(overrides),
+            "server_file": served_name,
+            "revision": revision,
+            "subtitle_config": stored_subtitle_config,
         }
     except Exception as e:
         if reservation_id:
@@ -3338,6 +3429,7 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         
     clip_data = clips[req.clip_index]
     subtitle_config = _subtitle_config_from_request(req)
+    render_opts = subtitle_render_options(subtitle_config)
 
     # Recut clips concatenate several source segments, so their caption window
     # is not the flat start..end range — restyle against the clip-relative
@@ -3404,18 +3496,22 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
     generation_id = time.time_ns()
     revision = str(generation_id)
     render_style, render_effect = resolve_render_style(
-        req.style, req.animation, req.effect)
+        subtitle_config["style"], subtitle_config["animation"],
+        subtitle_config["effect"])
     is_karaoke = render_style == "karaoke"
     srt_filename = f"subs_{req.clip_index}_{revision}.{'ass' if is_karaoke else 'srt'}"
     srt_path = os.path.join(output_dir, srt_filename)
 
     # Style options shared by the karaoke ASS generator paths.
     karaoke_opts = dict(
-        alignment=req.position, fontsize=req.font_size, font_name=req.font_name,
-        font_color=req.font_color, border_color=req.border_color,
-        border_width=req.border_width, highlight_color=req.highlight_color,
-        bg_color=req.bg_color, bg_opacity=req.bg_opacity,
-        effect=render_effect, base_opacity=req.base_opacity, uppercase=req.uppercase,
+        alignment=render_opts["alignment"], fontsize=render_opts["font_size"],
+        font_name=render_opts["font_name"], font_color=render_opts["font_color"],
+        border_color=render_opts["border_color"],
+        border_width=render_opts["border_width"],
+        highlight_color=render_opts["highlight_color"],
+        bg_color=render_opts["bg_color"], bg_opacity=render_opts["bg_opacity"],
+        effect=render_effect, base_opacity=render_opts["base_opacity"],
+        uppercase=render_opts["uppercase"],
     )
 
     # Output video
@@ -3465,10 +3561,14 @@ async def add_subtitles(req: SubtitleRequest, request: Request):
         # Run in thread pool
         def run_burn():
              burn_subtitles(input_path, srt_path, output_path,
-                           alignment=req.position, fontsize=req.font_size,
-                           font_name=req.font_name, font_color=req.font_color,
-                           border_color=req.border_color, border_width=req.border_width,
-                           bg_color=req.bg_color, bg_opacity=req.bg_opacity)
+                           alignment=render_opts["alignment"],
+                           fontsize=render_opts["font_size"],
+                           font_name=render_opts["font_name"],
+                           font_color=render_opts["font_color"],
+                           border_color=render_opts["border_color"],
+                           border_width=render_opts["border_width"],
+                           bg_color=render_opts["bg_color"],
+                           bg_opacity=render_opts["bg_opacity"])
         
         loop = asyncio.get_event_loop()
         await loop.run_in_executor(None, run_burn)
@@ -3640,6 +3740,7 @@ async def add_hook(req: HookRequest, request: Request):
         raise HTTPException(status_code=404, detail="Clip not found")
         
     clip_data = clips[req.clip_index]
+    existing_subtitle_config = clip_data.get('subtitle_config')
     
     # Video Path
     if req.input_filename:
@@ -3709,7 +3810,20 @@ async def add_hook(req: HookRequest, request: Request):
         recap = await asyncio.get_event_loop().run_in_executor(
             None, _reapply_captions, req.job_id, req.clip_index, output_path)
         if recap:
-            output_filename = os.path.basename(recap)
+            output_filename = os.path.basename(_caption_artifact_path(recap))
+            existing_subtitle_config, caption_revision = _caption_artifact_recipe(recap)
+        else:
+            existing_subtitle_config, caption_revision = None, None
+    else:
+        existing_subtitle_config, caption_revision = None, None
+
+    revision = caption_revision or f"hook-{time.time_ns()}"
+    render_update = {
+        "video_url": f"/videos/{req.job_id}/{output_filename}",
+        "server_file": output_filename,
+        "render_revision": revision,
+        "subtitle_config": existing_subtitle_config,
+    }
 
     # Record the burned hook so the editor knows what the clip carries (the
     # auto-hook pipeline writes the same key).
@@ -3725,7 +3839,7 @@ async def add_hook(req: HookRequest, request: Request):
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
         mem_clip = job['result']['clips'][req.clip_index]
-        mem_clip['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+        mem_clip.update(render_update)
         if req.remove:
             mem_clip.pop('auto_hook', None)
         else:
@@ -3734,7 +3848,7 @@ async def add_hook(req: HookRequest, request: Request):
     # Update Metadata on Disk
     try:
         if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            clips[req.clip_index].update(render_update)
             data['shorts'] = clips
             with open(json_files[0], 'w') as f:
                 json.dump(data, f, indent=4)
@@ -3747,6 +3861,9 @@ async def add_hook(req: HookRequest, request: Request):
     return {
         "success": True,
         "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "server_file": output_filename,
+        "revision": revision,
+        "subtitle_config": existing_subtitle_config,
         "burned_hook": None if req.remove else clip_data['auto_hook'],
     }
 
@@ -3829,14 +3946,24 @@ async def translate_clip(
         print(f"❌ Translation Error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+    # Dubbing replaces the audio/content track; the old burned caption recipe
+    # is no longer truthful until the user explicitly applies captions again.
+    revision = f"translate-{time.time_ns()}"
+    render_update = {
+        "video_url": f"/videos/{req.job_id}/{output_filename}",
+        "server_file": output_filename,
+        "render_revision": revision,
+        "subtitle_config": None,
+    }
+
     # Update InMemory Jobs
     if req.clip_index < len(job['result']['clips']):
-         job['result']['clips'][req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+         job['result']['clips'][req.clip_index].update(render_update)
 
     # Update Metadata on Disk
     try:
         if req.clip_index < len(clips):
-            clips[req.clip_index]['video_url'] = f"/videos/{req.job_id}/{output_filename}"
+            clips[req.clip_index].update(render_update)
             data['shorts'] = clips
             with open(json_files[0], 'w') as f:
                 json.dump(data, f, indent=4)
@@ -3848,7 +3975,10 @@ async def translate_clip(
 
     return {
         "success": True,
-        "new_video_url": f"/videos/{req.job_id}/{output_filename}"
+        "new_video_url": f"/videos/{req.job_id}/{output_filename}",
+        "server_file": output_filename,
+        "revision": revision,
+        "subtitle_config": None,
     }
 
 class SocialPostRequest(BaseModel):
