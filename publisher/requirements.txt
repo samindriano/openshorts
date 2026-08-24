@@ -1,0 +1,4 @@
+fastapi==0.136.1
+uvicorn==0.46.0
+playwright==1.62.0
+tiktok-uploader @ git+https://github.com/wkaisertexas/tiktok-uploader.git@6f6c594ca087b35bb152b3c60cd0196e7e46b2b9

@@ -247,6 +247,7 @@ function App() {
 
   const [uploadUserId, setUploadUserId] = useState(() => localStorage.getItem('uploadUserId') || '');
   const [userProfiles, setUserProfiles] = useState([]); // List of {username, connected: []}
+  const [localTikTokStatus, setLocalTikTokStatus] = useState(null);
   // Post-generation social nudge: shown at the results peak until the user
   // either connects a network or dismisses it. Only 2.7% of cloud users who
   // reach the social flow ever connect an account — this is the moment (clips
@@ -772,6 +773,18 @@ function App() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [uploadPostKey, isManaged]);
+
+  // Self-hosted TikTok publishing is backend-owned. Only safe status metadata
+  // is fetched here; cookies/session IDs never enter React state or storage.
+  useEffect(() => {
+    if (billingEnabled) return;
+    let cancelled = false;
+    apiFetch('/api/local/tiktok/status')
+      .then((res) => res.ok ? res.json() : null)
+      .then((data) => { if (!cancelled && data) setLocalTikTokStatus(data); })
+      .catch(() => { if (!cancelled) setLocalTikTokStatus({ available: false, state: 'unavailable' }); });
+    return () => { cancelled = true; };
+  }, [billingEnabled]);
 
   // For managed users, fetch the durable R2 URLs of the current job's clips. The
   // preview player prefers them (free egress, edge-served, and not competing with
@@ -1936,6 +1949,7 @@ function App() {
                           geminiApiKey={apiKey}
                           elevenLabsKey={elevenLabsKey}
                           isManaged={isManaged}
+                          localTikTokStatus={localTikTokStatus}
                           connectedPlatforms={(userProfiles.find((p) => p.username === uploadUserId) || userProfiles[0])?.connected ?? null}
                           onConnectSocials={isManaged ? handleConnectSocials : null}
                           onPlay={(time) => handleClipPlay(time)}

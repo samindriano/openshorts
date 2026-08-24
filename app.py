@@ -26,6 +26,12 @@ from pydantic import BaseModel
 from s3_uploader import upload_job_artifacts, list_all_clips, upload_actor_to_s3, list_actor_gallery, upload_video_to_gallery, list_video_gallery
 import recut
 from ai_provider import normalize_provider, spec_for
+from local_tiktok_publisher import (
+    LocalTikTokPublisherClient,
+    LocalTikTokPublishRequest,
+    build_caption,
+    resolve_authoritative_clip,
+)
 
 load_dotenv()
 
@@ -4168,6 +4174,47 @@ class SocialPostRequest(BaseModel):
     timezone: Optional[str] = "UTC"
 
 import httpx
+
+
+@app.get("/api/local/tiktok/status")
+async def local_tiktok_status(request: Request):
+    """Return safe local-publisher state; never expose cookie/session data."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Local publisher is self-host only")
+    return await LocalTikTokPublisherClient().status()
+
+
+@app.post("/api/local/tiktok/publish")
+async def publish_local_tiktok(req: LocalTikTokPublishRequest, request: Request):
+    """Publish/dry-run the exact current ResultCard MP4 through the local service."""
+    if BILLING_ENABLED:
+        raise HTTPException(status_code=404, detail="Local publisher is self-host only")
+    await _ensure_job_files(req.job_id, request)
+    if req.job_id not in jobs:
+        raise HTTPException(status_code=404, detail="Job not found")
+    job = jobs[req.job_id]
+    await _assert_job_owner(request, job)
+    if job.get("status") not in {"completed", "complete"}:
+        raise HTTPException(status_code=409, detail="Clip is not finished rendering")
+    if "result" not in job or "clips" not in job["result"]:
+        raise HTTPException(status_code=400, detail="Job result not available")
+
+    clip = job["result"]["clips"][req.clip_index] if req.clip_index < len(job["result"]["clips"]) else None
+    if clip is None:
+        raise HTTPException(status_code=404, detail="Clip not found")
+    authoritative = resolve_authoritative_clip(job, OUTPUT_DIR, req.job_id, req.clip_index)
+    caption = build_caption(clip, req.caption, req.hashtags)
+    normalized = req.model_copy(update={
+        "caption": caption,
+        "request_id": req.request_id or str(uuid.uuid4()),
+    })
+    result = await LocalTikTokPublisherClient().publish(authoritative, normalized, caption)
+    return {
+        **result,
+        "source_identity": authoritative.source_identity,
+        "source_sha256": authoritative.sha256,
+        "server_file": authoritative.filename,
+    }
 
 @app.post("/api/social/post")
 async def post_to_socials(req: SocialPostRequest, request: Request):

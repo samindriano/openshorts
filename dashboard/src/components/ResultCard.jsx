@@ -47,7 +47,7 @@ function reconcileActiveLayers(layers, serverFile) {
     return next;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, subtitleDefaults = null }) {
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, localTikTokStatus = null, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, subtitleDefaults = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -180,6 +180,13 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     });
     const [postTitle, setPostTitle] = useState("");
     const [postDescription, setPostDescription] = useState("");
+    const [postHashtags, setPostHashtags] = useState("");
+    const [productId, setProductId] = useState("");
+    const [privacy, setPrivacy] = useState("everyone");
+    const [allowComments, setAllowComments] = useState(true);
+    const [allowDuet, setAllowDuet] = useState(true);
+    const [allowStitch, setAllowStitch] = useState(true);
+    const [dryRun, setDryRun] = useState(true);
     const [isScheduling, setIsScheduling] = useState(false);
     const [scheduleDate, setScheduleDate] = useState("");
 
@@ -278,11 +285,16 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
     // Which platforms the selected profile actually has linked. `null` means
     // unknown (profile list not loaded) — in that case nothing is gated.
+    const localPublisherAvailable = !isManaged && localTikTokStatus?.available && localTikTokStatus?.enabled;
+    const localTikTokMode = Boolean(localPublisherAvailable);
     const knownConnections = Array.isArray(connectedPlatforms);
-    const noAccountsConnected = knownConnections && connectedPlatforms.length === 0;
+    const noAccountsConnected = !localTikTokMode && knownConnections && connectedPlatforms.length === 0;
     const platformOptions = knownConnections
         ? PLATFORM_OPTIONS.map((o) => (connectedPlatforms.includes(o.value) ? o : { ...o, disabled: true, hint: 'not connected' }))
         : PLATFORM_OPTIONS;
+    const effectivePlatformOptions = localTikTokMode
+        ? PLATFORM_OPTIONS.map((o) => o.value === 'tiktok' ? o : { ...o, disabled: true, hint: 'local publisher is TikTok-only' })
+        : platformOptions;
 
     const handleConnectAccounts = () => {
         setShowModal(false);
@@ -295,19 +307,28 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         if (showModal) {
             setPostTitle(clip.video_title_for_youtube_short || "Viral Short");
             setPostDescription(clip.video_description_for_instagram || clip.video_description_for_tiktok || "");
+            setPostHashtags("");
+            setProductId("");
+            setPrivacy("everyone");
+            setAllowComments(true);
+            setAllowDuet(true);
+            setAllowStitch(true);
+            setDryRun(true);
             setIsScheduling(false);
             setScheduleDate("");
             setPostResult(null);
             // Only preselect platforms the profile can actually publish to.
             if (knownConnections) {
-                setPlatforms({
+                setPlatforms(localTikTokMode ? { tiktok: true, instagram: false, youtube: false } : {
                     tiktok: connectedPlatforms.includes('tiktok'),
                     instagram: connectedPlatforms.includes('instagram'),
                     youtube: connectedPlatforms.includes('youtube'),
                 });
+            } else if (localTikTokMode) {
+                setPlatforms({ tiktok: true, instagram: false, youtube: false });
             }
         }
-    }, [showModal, clip]);
+    }, [showModal, clip, localTikTokMode, connectedPlatforms]);
 
     const handleAutoEdit = async () => {
         setIsEditing(true);
@@ -641,7 +662,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     };
 
     // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = isManaged || (uploadPostKey && uploadUserId);
+    const canPost = localTikTokMode || isManaged || (uploadPostKey && uploadUserId);
 
     const handlePost = async () => {
         if (!canPost) {
@@ -657,6 +678,10 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         const selectedPlatforms = Object.keys(platforms).filter(k => platforms[k]);
         if (selectedPlatforms.length === 0) {
             setPostResult({ success: false, msg: "Select at least one platform." });
+            return;
+        }
+        if (localTikTokMode && (selectedPlatforms.length !== 1 || selectedPlatforms[0] !== 'tiktok')) {
+            setPostResult({ success: false, msg: "Local publisher supports TikTok only." });
             return;
         }
 
@@ -686,10 +711,25 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 payload.timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
             }
 
-            const res = await apiFetch('/api/social/post', {
+            const localPayload = {
+                job_id: jobId,
+                clip_index: index,
+                caption: postDescription,
+                hashtags: postHashtags.split(/[,\s]+/).map((tag) => tag.trim().replace(/^#/, '')).filter(Boolean),
+                schedule_at: isScheduling && scheduleDate ? new Date(scheduleDate).toISOString() : null,
+                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                product_id: productId.trim() || null,
+                privacy,
+                allow_comments: allowComments,
+                allow_duet: allowDuet,
+                allow_stitch: allowStitch,
+                dry_run: dryRun,
+            };
+
+            const res = await apiFetch(localTikTokMode ? '/api/local/tiktok/publish' : '/api/social/post', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(localTikTokMode ? localPayload : payload)
             });
 
             if (!res.ok) {
@@ -702,11 +742,22 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 }
             }
 
-            setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
-            setTimeout(() => {
-                setShowModal(false);
-                setPostResult(null);
-            }, 3000);
+            const data = await res.json().catch(() => ({}));
+            if (localTikTokMode) {
+                const messages = {
+                    success: dryRun ? "Dry-run passed: current MP4, caption, and options verified." : "TikTok publisher confirmed the upload.",
+                    login_required: "TikTok login is required. Add the local session before publishing.",
+                    unknown: "Outcome is unknown. Inspect TikTok before retrying; no automatic retry was made.",
+                    failed: "TikTok publisher reported a failure.",
+                };
+                setPostResult({ success: data.state === 'success', msg: messages[data.state] || `Publisher state: ${data.state || 'unknown'}` });
+            } else {
+                setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
+                setTimeout(() => {
+                    setShowModal(false);
+                    setPostResult(null);
+                }, 3000);
+            }
 
         } catch (e) {
             setPostResult({ success: false, msg: `Failed: ${e.message}` });
@@ -1004,7 +1055,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {!canPost && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>Configure API Key in Settings first.</div>
+                        <div>{localTikTokStatus && !localTikTokStatus.available ? 'Local TikTok publisher is unavailable.' : 'Configure API Key in Settings first.'}</div>
+                    </div>
+                )}
+
+                {localTikTokMode && (
+                    <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
+                        <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
+                        <div>Local TikTok publisher: <b className="text-ink">{localTikTokStatus.login_required ? 'login required' : localTikTokStatus.busy ? 'busy' : 'ready'}</b>. {dryRun ? 'Dry-run is enabled and will not open TikTok.' : 'Live publishing is enabled; ambiguous results are never retried automatically.'}</div>
                     </div>
                 )}
 
@@ -1019,7 +1077,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     someone expecting a live post and finding nothing on their
                     profile will read it as a failure. Lead with the upside —
                     posting from inside the app is what the algorithm rewards. */}
-                {platforms.tiktok && (
+                {platforms.tiktok && !localTikTokMode && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
                         <div>
@@ -1055,6 +1113,35 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         />
                     </div>
 
+                    {localTikTokMode && (
+                        <>
+                            <div>
+                                <label className="eyebrow block mb-1.5">HASHTAGS</label>
+                                <input type="text" value={postHashtags} onChange={(e) => setPostHashtags(e.target.value)} className="input-field" placeholder="#finance #fyp" />
+                            </div>
+                            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                <div>
+                                    <label className="eyebrow block mb-1.5">PRIVACY</label>
+                                    <select value={privacy} onChange={(e) => setPrivacy(e.target.value)} className="input-field">
+                                        <option value="everyone">Everyone</option>
+                                        <option value="friends">Friends</option>
+                                        <option value="only_you">Only you</option>
+                                    </select>
+                                </div>
+                                <div>
+                                    <label className="eyebrow block mb-1.5">PRODUCT ID · OPTIONAL</label>
+                                    <input type="text" value={productId} onChange={(e) => setProductId(e.target.value)} className="input-field" placeholder="TikTok product ID" />
+                                </div>
+                            </div>
+                            <div className="space-y-2 text-xs text-ink2">
+                                <label className="flex items-center gap-2"><input type="checkbox" checked={allowComments} onChange={(e) => setAllowComments(e.target.checked)} className="accent-brass" />Allow comments</label>
+                                <label className="flex items-center gap-2"><input type="checkbox" checked={allowDuet} onChange={(e) => setAllowDuet(e.target.checked)} className="accent-brass" />Allow duet</label>
+                                <label className="flex items-center gap-2"><input type="checkbox" checked={allowStitch} onChange={(e) => setAllowStitch(e.target.checked)} className="accent-brass" />Allow stitch</label>
+                                <label className="flex items-center gap-2 pt-1"><input type="checkbox" checked={dryRun} onChange={(e) => setDryRun(e.target.checked)} className="accent-brass" />Dry-run (recommended)</label>
+                            </div>
+                        </>
+                    )}
+
                     {/* Scheduling */}
                     <div className="p-3 bg-paper rounded-input border border-rule">
                         <label className="flex items-center justify-between cursor-pointer">
@@ -1088,7 +1175,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                         <SegmentedControl
                             multi
                             columns={3}
-                            options={platformOptions}
+                            options={effectivePlatformOptions}
                             value={Object.keys(platforms).filter(k => platforms[k])}
                             onChange={(arr) => setPlatforms({
                                 tiktok: arr.includes('tiktok'),

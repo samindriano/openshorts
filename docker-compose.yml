@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     environment:
       - YOLO_MODEL_PATH=/models/yolov8n.pt
+      - LOCAL_TIKTOK_PUBLISHER_URL=http://publisher:3200
     volumes:
       - .:/app
       - /app/__pycache__
@@ -15,6 +16,8 @@ services:
     # is enough; no generated media or uploads are touched.
     command: ["uvicorn", "app_entry:app", "--host", "0.0.0.0", "--port", "8000", "--proxy-headers", "--forwarded-allow-ips", "*"]
     restart: unless-stopped
+    depends_on:
+      - publisher
 
   frontend:
     build:
@@ -46,3 +49,21 @@ services:
     restart: unless-stopped
     depends_on:
       - backend
+
+  publisher:
+    build:
+      context: .
+      dockerfile: publisher/Dockerfile
+    container_name: openshorts-local-tiktok-publisher
+    ports:
+      - "3200:3200"
+    volumes:
+      - ./output:/output:ro
+      - ./publisher-data:/publisher-data
+    environment:
+      - PUBLISHER_OUTPUT_DIR=/output
+      - PUBLISHER_DATA_DIR=/publisher-data
+      - TIKTOK_UPLOADER_COMMIT=6f6c594ca087b35bb152b3c60cd0196e7e46b2b9
+      - TIKTOK_UPLOADER_HEADLESS=true
+      - TIKTOK_UPLOADER_BROWSER=chromium
+    restart: unless-stopped
