@@ -287,6 +287,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // unknown (profile list not loaded) — in that case nothing is gated.
     const localPublisherAvailable = !isManaged && localTikTokStatus?.available && localTikTokStatus?.enabled;
     const localTikTokMode = Boolean(localPublisherAvailable);
+    const localPublisherBusy = localTikTokMode && Boolean(localTikTokStatus?.busy);
+    const localPublisherLabel = localTikTokStatus?.login_required
+        ? 'login required'
+        : localPublisherBusy
+            ? 'busy'
+            : ['failed', 'unknown'].includes(localTikTokStatus?.state)
+                ? localTikTokStatus.state
+                : 'ready';
     const knownConnections = Array.isArray(connectedPlatforms);
     const noAccountsConnected = !localTikTokMode && knownConnections && connectedPlatforms.length === 0;
     const platformOptions = knownConnections
@@ -662,7 +670,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     };
 
     // Managed (cloud plan/trial) users post with the server-side key — no BYOK needed
-    const canPost = localTikTokMode || isManaged || (uploadPostKey && uploadUserId);
+    const canPost = (localTikTokMode && !localPublisherBusy) || isManaged || (uploadPostKey && uploadUserId);
 
     const handlePost = async () => {
         if (!canPost) {
@@ -717,7 +725,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 caption: postDescription,
                 hashtags: postHashtags.split(/[,\s]+/).map((tag) => tag.trim().replace(/^#/, '')).filter(Boolean),
                 schedule_at: isScheduling && scheduleDate ? new Date(scheduleDate).toISOString() : null,
-                timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+                timezone: isScheduling && scheduleDate ? Intl.DateTimeFormat().resolvedOptions().timeZone : null,
                 product_id: productId.trim() || null,
                 privacy,
                 allow_comments: allowComments,
@@ -1055,14 +1063,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 {!canPost && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-warn bg-[color-mix(in_oklab,var(--color-warn)_10%,transparent)] flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0" />
-                        <div>{localTikTokStatus && !localTikTokStatus.available ? 'Local TikTok publisher is unavailable.' : 'Configure API Key in Settings first.'}</div>
+                        <div>{localTikTokStatus?.busy ? 'Local TikTok publisher is busy. Wait for the current request to finish.' : localTikTokStatus && !localTikTokStatus.available ? 'Local TikTok publisher is unavailable.' : 'Configure API Key in Settings first.'}</div>
                     </div>
                 )}
 
                 {localTikTokMode && (
                     <div className="mb-4 px-3 py-2 rounded-input text-xs text-ink2 bg-paper3 flex items-start gap-2">
                         <AlertCircle size={14} className="mt-0.5 shrink-0 text-brass" />
-                        <div>Local TikTok publisher: <b className="text-ink">{localTikTokStatus.login_required ? 'login required' : localTikTokStatus.busy ? 'busy' : 'ready'}</b>. {dryRun ? 'Dry-run is enabled and will not open TikTok.' : 'Live publishing is enabled; ambiguous results are never retried automatically.'}</div>
+                        <div>Local TikTok publisher: <b className="text-ink">{localPublisherLabel}</b>. {dryRun ? 'Dry-run is enabled and will not open TikTok.' : 'Live publishing is enabled; ambiguous results are never retried automatically.'}</div>
                     </div>
                 )}
 

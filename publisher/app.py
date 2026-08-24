@@ -30,10 +30,23 @@ OUTPUT_DIR = Path(os.environ.get("PUBLISHER_OUTPUT_DIR", "/output"))
 COOKIE_FILE = Path(os.environ.get("TIKTOK_COOKIE_FILE", str(DATA_DIR / "tiktok-cookies.txt")))
 UPSTREAM_COMMIT = os.environ.get(
     "TIKTOK_UPLOADER_COMMIT", "6f6c594ca087b35bb152b3c60cd0196e7e46b2b9")
+UPSTREAM_ATTEMPTS = 1  # one initial attempt; the adapter never auto-retries
 HEADLESS = os.environ.get("TIKTOK_UPLOADER_HEADLESS", "true").lower() in {"1", "true", "yes"}
 BROWSER = os.environ.get("TIKTOK_UPLOADER_BROWSER", "chromium")
 STATE_FILE = DATA_DIR / "state.json"
 LOCK = threading.Lock()
+
+
+class LoginRequiredError(RuntimeError):
+    """The browser session is absent or no longer accepted by TikTok."""
+
+
+def _looks_like_login_error(exc: Exception) -> bool:
+    name = exc.__class__.__name__.lower()
+    message = str(exc).lower()
+    return name in {"insufficientauth", "loginrequirederror"} or any(
+        marker in message for marker in ("login required", "authentication failed", "sessionid")
+    )
 
 
 class PublishRequest(BaseModel):
@@ -199,11 +212,15 @@ def _adapter_upload(req: PublishRequest, path: Path, schedule: Optional[datetime
                 schedule=schedule,
                 product_id=req.product_id,
                 visibility=req.privacy,
-                num_retries=0,
+                num_retries=UPSTREAM_ATTEMPTS,
                 comment=req.allow_comments,
                 duet=req.allow_duet,
                 stitch=req.allow_stitch,
             ))
+    except Exception as exc:
+        if _looks_like_login_error(exc):
+            raise LoginRequiredError("TikTok session requires login") from None
+        raise
     finally:
         logging.disable(previous_logging)
         if uploader is not None:
@@ -281,6 +298,12 @@ def publish(req: PublishRequest) -> dict[str, Any]:
             "interactivity": _interactivity(req),
             "product_id_forwarded": bool(req.product_id),
         })
+        if req.dry_run:
+            # Dry-run evidence must be able to prove the normalized request
+            # matched the UI input. Captions/product IDs are user content, not
+            # session material; keep them out of live/status records.
+            record["evidence"]["caption"] = req.caption
+            record["evidence"]["product_id"] = req.product_id
         state["requests"][req.request_id] = record
         _save_state(state)
 
@@ -307,7 +330,14 @@ def publish(req: PublishRequest) -> dict[str, Any]:
 
         try:
             ok = _adapter_upload(req, path, schedule)
-        except Exception as exc:
+        except LoginRequiredError:
+            record["state"] = "login_required"
+            record["error"] = "TikTok session requires login"
+            record["updated_at"] = datetime.now(timezone.utc).isoformat()
+            state["requests"][req.request_id] = record
+            _save_state(state)
+            return record
+        except Exception:
             # The browser may have reached TikTok before an exception escaped;
             # do not label that ambiguous outcome as a safe failure or retry it.
             record["state"] = "unknown"
