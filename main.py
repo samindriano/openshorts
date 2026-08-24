@@ -80,10 +80,23 @@ OUTPUT — RETURN ONLY VALID JSON (no markdown, no comments). Order clips by pre
 }}
 """
 
-# Load the YOLO model once (Keep for backup or scene analysis if needed)
+# Load the YOLO model once (Keep for backup or scene analysis if needed).
 # YOLO_MODEL_PATH lets deployments point at a pre-downloaded weights file so a
 # volume mounted over the workdir doesn't trigger a re-download at startup.
+#
+# Ultralytics defaults to CPU when no device is passed, even when a CUDA
+# runtime is visible. Keep CPU as the safe default stack, but make the GPU
+# overlay explicit so the fallback detector does not silently stay on CPU.
+_yolo_device = os.environ.get("YOLO_DEVICE", "auto").strip().lower()
+if _yolo_device in {"", "auto"}:
+    _yolo_device = "cuda" if torch.cuda.is_available() else "cpu"
+elif _yolo_device == "cuda" and not torch.cuda.is_available():
+    raise RuntimeError(
+        "YOLO_DEVICE=cuda was requested, but torch.cuda.is_available() is false"
+    )
 model = YOLO(os.environ.get("YOLO_MODEL_PATH", "yolov8n.pt"))
+model.to(_yolo_device)
+print(f"⚙️ YOLO device: {_yolo_device}", flush=True)
 
 # --- MediaPipe Setup ---
 # Use standard Face Detection (BlazeFace) for speed

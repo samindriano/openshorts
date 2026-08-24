@@ -161,6 +161,31 @@ The Compose bind mounts keep runtime data beside this checkout:
 The upstream `.gitignore` excludes `.env`, `output/`, `uploads/`, `.cache/`,
 `*.pt`, video extensions, and `*_metadata.json`.
 
+## Local Library and cleanup
+
+Self-hosted mode now exposes a `Local Library` item in the dashboard sidebar.
+It lists playable clips recovered from `output\\<job_id>\\` and adds a
+`Delete Files` action per generated job. The action is intentionally scoped to
+one UUID job directory and the upload files beginning with that exact job ID;
+it does not accept arbitrary paths, touch `output\\thumbnails\\`, or delete
+files from cloud/R2 history. Because a source upload is owned by its job, it is
+removed together with that job after confirmation. The clean/original clip and
+all derived subtitle/edit artifacts inside the job directory are deleted as a
+single reversible-in-the-UI-but-not-on-disk cleanup operation, so download
+anything that must be kept first.
+
+The local API used by the page is:
+
+```text
+GET    /api/local/history
+DELETE /api/local/history/<job_id>
+```
+
+Active or resumable jobs are rejected with a conflict response. The existing
+age-based `JOB_RETENTION_SECONDS` and size-cap cleanup remain available as
+automatic background cleanup; the page is the manual option when disk space is
+needed immediately.
+
 ## Docker storage recovery checkpoint
 
 The previous baseline build exhausted the available `C:` headroom while

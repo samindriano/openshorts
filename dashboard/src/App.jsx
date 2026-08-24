@@ -1077,7 +1077,9 @@ function App() {
       { id: 'ai-agent', ord: '03', icon: Bot, label: 'AI Agent', byok: true },
       { id: 'ugc-gallery', ord: '04', icon: LayoutGrid, label: 'UGC Gallery' },
       { id: 'thumbnails', ord: '05', icon: Image, label: 'YouTube Studio' },
-      ...(billingEnabled && isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : []),
+      ...(billingEnabled
+        ? (isSignedIn ? [{ id: 'history', ord: '06', icon: History, label: 'History' }] : [])
+        : [{ id: 'history', ord: '06', icon: History, label: 'Local Library' }]),
       { id: 'settings', ord: '07', icon: Settings, label: 'Settings' },
     ];
 
@@ -1647,7 +1649,13 @@ function App() {
           {activeTab === 'history' && (
             <div className="h-full overflow-y-auto custom-scrollbar animate-fade">
               <div className="max-w-6xl mx-auto p-6 md:p-8">
-                <HistoryTab onReopenProject={restoreProject} />
+                <HistoryTab
+                  localMode={!billingEnabled}
+                  onReopenProject={billingEnabled ? restoreProject : null}
+                  onLocalDelete={(deletedJobId) => {
+                    if (!billingEnabled && deletedJobId === jobId) handleReset();
+                  }}
+                />
               </div>
             </div>
           )}
