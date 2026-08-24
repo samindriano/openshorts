@@ -6,7 +6,7 @@ import { apiJson } from '../lib/api';
 // local /videos links plus cleanup controls in self-host mode. Videos are
 // grouped by project (job); re-openable cloud projects can be restored for
 // further editing in the Clip Generator.
-export default function HistoryTab({ onReopenProject, onLocalDelete, localMode = false }) {
+export default function HistoryTab({ onReopenProject, onOpenLocalProject, onLocalDelete, localMode = false }) {
   const [videos, setVideos] = useState(null);
   const [projects, setProjects] = useState({});
   const [reopening, setReopening] = useState(null);
@@ -56,11 +56,12 @@ export default function HistoryTab({ onReopenProject, onLocalDelete, localMode =
   }, [videos]);
 
   const handleReopen = async (jobId) => {
-    if (!onReopenProject || reopening) return;
+    const openProject = localMode ? onOpenLocalProject : onReopenProject;
+    if (!openProject || reopening) return;
     setReopening(jobId);
     setReopenError('');
     try {
-      await onReopenProject(jobId);
+      await openProject(jobId);
     } catch (e) {
       setReopenError('Could not reopen this project. Please try again.');
       setReopening(null);
@@ -136,16 +137,16 @@ export default function HistoryTab({ onReopenProject, onLocalDelete, localMode =
                     {fmtDate(vids[0]?.created_at)} · {vids.length} clip{vids.length === 1 ? '' : 's'}
                   </p>
                 </div>
-                {project && onReopenProject && (
+                {project && (localMode ? onOpenLocalProject : onReopenProject) && (
                   <button
                     onClick={() => handleReopen(jobId)}
                     disabled={!!reopening}
                     className="btn-ghost px-3 py-2 text-xs shrink-0"
-                    title="Restore this project in the Clip Generator to keep editing subtitles, hooks, effects and dubbing"
+                    title="Open this project in the Clip Generator to keep editing subtitles, hooks, effects and dubbing"
                   >
                     {reopening === jobId
-                      ? <><Loader2 size={14} className="animate-spin" /> reopening…</>
-                      : <><FolderOpen size={14} /> reopen project</>}
+                      ? <><Loader2 size={14} className="animate-spin" /> opening…</>
+                      : <><FolderOpen size={14} /> open project</>}
                   </button>
                 )}
                 {localMode && (

@@ -541,6 +541,26 @@ function App() {
     setActiveTab('dashboard');
   };
 
+  // Local-library jobs are already recovered from disk by the backend. Open
+  // the recovered result directly instead of routing through the paid-mode R2
+  // restore endpoint, which is intentionally unavailable in self-host mode.
+  const openLocalProject = async (localJobId) => {
+    const data = await apiJson(`/api/status/${localJobId}`);
+    if (data.status !== 'completed' || !data.result?.clips?.length) {
+      throw new Error('Local project is not ready to edit.');
+    }
+    flushClipState();
+    setProjectState(null);
+    setNoSource(true);
+    setJobId(localJobId);
+    setResults(data.result);
+    setLogs(['♻️ Local project opened from disk.']);
+    setProcessingMedia(null);
+    setQualityGate(null);
+    setStatus('complete');
+    setActiveTab('dashboard');
+  };
+
   // Apply one subtitle style to every clip of the job, sequentially.
   const handleBulkSubtitles = async (options) => {
     const clips = results?.clips || [];
@@ -1652,6 +1672,7 @@ function App() {
                 <HistoryTab
                   localMode={!billingEnabled}
                   onReopenProject={billingEnabled ? restoreProject : null}
+                  onOpenLocalProject={billingEnabled ? null : openLocalProject}
                   onLocalDelete={(deletedJobId) => {
                     if (!billingEnabled && deletedJobId === jobId) handleReset();
                   }}
