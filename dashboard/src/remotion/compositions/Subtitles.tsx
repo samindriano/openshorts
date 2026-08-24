@@ -67,10 +67,13 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
   const frame = useCurrentFrame();
   const { fps } = useVideoConfig();
   const { style, position } = config;
+  const isKaraoke = style.mode !== "classic";
 
   // Current time relative to composition start (sequence-relative frame)
   const currentTimeMs = blockStartMs + (frame / fps) * 1000;
-  const activeIndex = getActiveWordIndex(block.words, currentTimeMs);
+  const activeIndex = isKaraoke
+    ? getActiveWordIndex(block.words, currentTimeMs)
+    : -1;
 
   const positionStyle = POSITION_MAP[position] ?? POSITION_MAP.bottom;
   const fontStack = getFontStack(style.fontFamily);
@@ -115,7 +118,7 @@ const SubtitleBlock: React.FC<SubtitleBlockProps> = ({
             isActive={i === activeIndex}
             style={style}
             fontStack={fontStack}
-            animation={style.animation}
+            animation={isKaraoke ? style.animation : "none"}
             frame={frame}
             fps={fps}
             wordStartMs={word.startMs}

@@ -12,6 +12,7 @@ export type SubtitleAnimation = "none" | "word-highlight" | "pop" | "karaoke";
 export type SubtitlePosition = "top" | "middle" | "bottom";
 
 export interface SubtitleStyle {
+  mode?: "classic" | "karaoke";
   fontFamily: string;
   fontSize: number;
   fontColor: string;
@@ -89,6 +90,7 @@ export const captionWordSchema = z.object({
 });
 
 export const subtitleStyleSchema = z.object({
+  mode: z.enum(["classic", "karaoke"]).default("karaoke"),
   fontFamily: z.string(),
   fontSize: z.number(),
   fontColor: z.string(),
@@ -98,6 +100,8 @@ export const subtitleStyleSchema = z.object({
   bgColor: z.string(),
   bgOpacity: z.number().min(0).max(1),
   animation: z.enum(["none", "word-highlight", "pop", "karaoke"]),
+  baseOpacity: z.number().min(0.05).max(1).optional(),
+  uppercase: z.boolean().optional(),
 });
 
 export const subtitleConfigSchema = z.object({

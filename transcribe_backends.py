@@ -116,6 +116,12 @@ def _get_whisper_model():
 
 def _run_whisper_once(media_path, **params):
     model, device = _get_whisper_model()
+    compute_type = _whisper_key[2]
+    print(
+        f"🎙️ [ASR] Whisper runtime: device={device}, "
+        f"compute_type={compute_type}",
+        flush=True,
+    )
     gate = _ASR_GATE if device != "cpu" else _NULL_GATE
     with gate:
         segments, info = model.transcribe(media_path, **params)

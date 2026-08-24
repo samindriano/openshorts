@@ -4,6 +4,7 @@ import { apiFetch } from '../lib/api';
 import RemotionPreview from './RemotionPreview';
 import Modal from './ui/Modal';
 import SegmentedControl from './ui/SegmentedControl';
+import { DEFAULT_SUBTITLE_OPTIONS, normalizeSubtitleConfig, toRemotionSubtitleConfig } from '../lib/subtitleRequest';
 
 const FONT_OPTIONS = [
     { value: 'Verdana', label: 'Verdana' },
@@ -65,24 +66,25 @@ const swatchClass = (selected) =>
         ? 'ring-2 ring-[color:var(--color-accent)] ring-offset-2 ring-offset-[color:var(--color-paper-2)]'
         : 'ring-1 ring-[color:var(--color-rule-2)] hover:ring-[color:var(--color-accent)]'}`;
 
-export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, error, videoUrl, jobId, clipIndex, existingHook, existingSubtitles, bulkCount = 0, bulkProgress }) {
-    const [position, setPosition] = useState('bottom');
-    const [fontSize, setFontSize] = useState(20);
-    const [fontName, setFontName] = useState('Verdana');
-    const [fontColor, setFontColor] = useState('#FFFFFF');
-    const [highlightColor, setHighlightColor] = useState('#FFDD00');
-    const [borderColor, setBorderColor] = useState('#000000');
-    const [borderWidth, setBorderWidth] = useState(2);
-    const [bgColor, setBgColor] = useState('#000000');
-    const [bgOpacity, setBgOpacity] = useState(0.0);
-    const [animation, setAnimation] = useState('none');
+export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll, onRemove, isProcessing, error, videoUrl, jobId, clipIndex, existingHook, existingSubtitles, bulkCount = 0, bulkProgress, subtitleDefaults = null }) {
+    const defaults = subtitleDefaults || DEFAULT_SUBTITLE_OPTIONS;
+    const [position, setPosition] = useState(defaults.position);
+    const [fontSize, setFontSize] = useState(defaults.fontSize);
+    const [fontName, setFontName] = useState(defaults.fontName);
+    const [fontColor, setFontColor] = useState(defaults.fontColor);
+    const [highlightColor, setHighlightColor] = useState(defaults.highlightColor);
+    const [borderColor, setBorderColor] = useState(defaults.borderColor);
+    const [borderWidth, setBorderWidth] = useState(defaults.borderWidth);
+    const [bgColor, setBgColor] = useState(defaults.bgColor);
+    const [bgOpacity, setBgOpacity] = useState(defaults.bgOpacity);
+    const [animation, setAnimation] = useState(defaults.animation);
     const [showTextEditor, setShowTextEditor] = useState(false);
 
     // Karaoke (server-side ASS burn) state
-    const [style, setStyle] = useState('classic'); // classic | karaoke
-    const [effect, setEffect] = useState('none'); // none | glow | pop | box
-    const [baseOpacity, setBaseOpacity] = useState(1.0);
-    const [uppercase, setUppercase] = useState(false);
+    const [style, setStyle] = useState(defaults.style); // classic | karaoke
+    const [effect, setEffect] = useState(defaults.effect); // none | glow | pop | box
+    const [baseOpacity, setBaseOpacity] = useState(defaults.baseOpacity);
+    const [uppercase, setUppercase] = useState(defaults.uppercase);
     const [activePreset, setActivePreset] = useState(null);
 
     const applyPreset = (p) => {
@@ -100,6 +102,13 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
         setAnimation(p.style === 'karaoke' ? (p.effect === 'pop' ? 'pop' : p.effect === 'glow' ? 'word-highlight' : 'karaoke') : 'none');
     };
 
+    const handleAnimationChange = (next) => {
+        setAnimation(next);
+        // Explicitly switch the visual mode when a motion style is selected;
+        // the request serializer never promotes classic behind the user's back.
+        if (next !== 'none') setStyle('karaoke');
+    };
+
     // Remotion preview state
     const [captions, setCaptions] = useState([]);
     const [originalCaptions, setOriginalCaptions] = useState([]);
@@ -113,30 +122,36 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     // rebuilt the controls from defaults even though the file had a different
     // style and possibly edited words.
     useEffect(() => {
-        if (!isOpen || !existingSubtitles) return;
-        const config = existingSubtitles;
-        setPosition(config.position || 'bottom');
-        setFontSize(Number.isFinite(Number(config.fontSize)) ? Number(config.fontSize) : 20);
-        setFontName(config.fontName || 'Verdana');
-        setFontColor(config.fontColor || '#FFFFFF');
-        setHighlightColor(config.highlightColor || '#FFDD00');
-        setBorderColor(config.borderColor || '#000000');
-        setBorderWidth(Number.isFinite(Number(config.borderWidth)) ? Number(config.borderWidth) : 2);
-        setBgColor(config.bgColor || '#000000');
-        setBgOpacity(Number.isFinite(Number(config.bgOpacity)) ? Number(config.bgOpacity) : 0);
-        setStyle(config.style || 'classic');
-        setEffect(config.effect || 'none');
-        setAnimation(config.animation || 'none');
-        setBaseOpacity(Number.isFinite(Number(config.baseOpacity)) ? Number(config.baseOpacity) : 1);
-        setUppercase(Boolean(config.uppercase));
+        if (!isOpen) return;
+        const config = normalizeSubtitleConfig(existingSubtitles || {}, defaults);
+        setPosition(config.position);
+        setFontSize(config.fontSize);
+        setFontName(config.fontName);
+        setFontColor(config.fontColor);
+        setHighlightColor(config.highlightColor);
+        setBorderColor(config.borderColor);
+        setBorderWidth(config.borderWidth);
+        setBgColor(config.bgColor);
+        setBgOpacity(config.bgOpacity);
+        setStyle(config.style);
+        setEffect(config.effect);
+        setAnimation(config.animation);
+        setBaseOpacity(config.baseOpacity);
+        setUppercase(config.uppercase);
         setActivePreset(null);
+        setShowTextEditor(false);
         if (Array.isArray(config.captions) && config.captions.length > 0) {
             setCaptions(config.captions);
             setOriginalCaptions(config.captions);
             setEditableText(config.captions.map((c) => c.text).join(' '));
             setUseRemotionPreview(true);
+        } else {
+            setCaptions([]);
+            setOriginalCaptions([]);
+            setEditableText('');
+            setUseRemotionPreview(false);
         }
-    }, [isOpen, existingSubtitles]);
+    }, [isOpen, existingSubtitles, subtitleDefaults]);
 
     // Fetch word-level captions when modal opens
     useEffect(() => {
@@ -189,24 +204,11 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
     if (!isOpen) return null;
 
     // Build subtitle config for Remotion
-    const subtitleConfig = {
-        captions,
-        position,
-        style: {
-            fontFamily: fontName,
-            fontSize: fontSize * 2.0, // Scale up for 1080p (modal fontSize is for small preview)
-            fontColor,
-            highlightColor,
-            borderColor,
-            borderWidth: borderWidth * 1.5,
-            bgColor,
-            bgOpacity,
-            animation,
-            // Karaoke look reflected live in the playable preview.
-            baseOpacity: style === 'karaoke' ? baseOpacity : 1,
-            uppercase: style === 'karaoke' ? uppercase : false,
-        },
-    };
+    const subtitleConfig = toRemotionSubtitleConfig({
+        position, fontSize, fontName, fontColor, highlightColor,
+        borderColor, borderWidth, bgColor, bgOpacity,
+        animation, style, effect, baseOpacity, uppercase, captions,
+    }, defaults);
 
     // Fallback: static CSS preview (same as original)
     const bw = Math.max(borderWidth, 0);
@@ -336,7 +338,7 @@ export default function SubtitleModal({ isOpen, onClose, onGenerate, onApplyAll,
                             <SegmentedControl
                                 options={ANIMATION_OPTIONS}
                                 value={animation}
-                                onChange={setAnimation}
+                                onChange={handleAnimationChange}
                                 columns={2}
                                 size="sm"
                             />

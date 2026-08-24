@@ -2,7 +2,6 @@
 // Adds the Authorization: Bearer header from the stored session token, and turns
 // a 402 (quota exceeded) into a typed QuotaError the UI can catch to prompt a top-up.
 import { getApiUrl } from '../config';
-import { normalizeSubtitleRequestOptions } from './subtitleRequest';
 
 export const AUTH_TOKEN_KEY = 'openshorts_auth';
 
@@ -21,15 +20,14 @@ export class QuotaError extends Error {
 
 // Drop-in fetch wrapper. Always attaches the bearer token when present.
 export async function apiFetch(path, options = {}) {
-  // The subtitle modal preview can express an active-word highlight even when
-  // its legacy style field still says "classic". Normalize that one contract
-  // before the request reaches the backend so the durable burn matches preview.
-  const normalizedOptions = normalizeSubtitleRequestOptions(path, options);
-  const headers = new Headers(normalizedOptions.headers || {});
+  // Request serializers are explicit at the feature boundary. Keep this
+  // transport wrapper side-effect free so a network helper cannot change a
+  // user's selected subtitle recipe.
+  const headers = new Headers(options.headers || {});
   const token = getToken();
   if (token) headers.set('Authorization', `Bearer ${token}`);
 
-  const res = await fetch(getApiUrl(path), { ...normalizedOptions, headers });
+  const res = await fetch(getApiUrl(path), { ...options, headers });
 
   if (res.status === 402) {
     let detail = {};

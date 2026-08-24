@@ -11,6 +11,7 @@ import WatermarkModal, { watermarkNoticeDismissed } from './WatermarkModal';
 import { useAuth } from '../contexts/AuthContext';
 import { renderInBrowser } from '../lib/renderInBrowser';
 import { cacheBustVideoUrl, filenameFromVideoUrl, selectPlaybackUrl } from '../lib/videoSource';
+import { serializeSubtitleRequest } from '../lib/subtitleRequest';
 
 const QUIET_BTN = 'group flex flex-col items-center justify-center gap-1.5 py-2.5 px-2 rounded-input border border-rule hover:bg-paper3 text-xs font-medium text-ink2 whitespace-nowrap transition-colors disabled:opacity-45 disabled:cursor-not-allowed';
 
@@ -36,7 +37,17 @@ function formatDuration(clip) {
     return `${String(Math.floor(secs / 60)).padStart(2, '0')}:${String(secs % 60).padStart(2, '0')}`;
 }
 
-export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null }) {
+const EMPTY_LAYERS = Object.freeze({ subtitles: null, hook: null, effects: null });
+
+function reconcileActiveLayers(layers, serverFile) {
+    const next = { ...EMPTY_LAYERS, ...(layers || {}) };
+    const filename = String(serverFile || '');
+    if (/(^|_)subtitled_\d+_/.test(filename)) next.subtitles = null;
+    if (/(^|_)(hook|hooked)_\d+_/.test(filename)) next.hook = null;
+    return next;
+}
+
+export default function ResultCard({ clip, index, jobId, durable, uploadPostKey, uploadUserId, geminiApiKey, elevenLabsKey, isManaged, onPlay, onPause, onBulkSubtitle, clipCount = 1, bulkProgress, initialState = null, onStateChange, onVideoUpdated = null, connectedPlatforms = null, onConnectSocials, onEditClip = null, onReframeClip = null, subtitleDefaults = null }) {
     const [showModal, setShowModal] = useState(false);
     const [showDescModal, setShowDescModal] = useState(false);
     const [showSubtitleModal, setShowSubtitleModal] = useState(false);
@@ -101,9 +112,8 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // All server-side operations must chain from this, so burned-in edits
     // (subtitles, hooks, effects) never get silently dropped.
     // A reopened project seeds it from the persisted project state.
-    const [serverVideoFile, setServerVideoFile] = useState(
-        initialState?.server_file || filenameFromVideoUrl(clip.video_url)
-    );
+    const initialServerVideoFile = initialState?.server_file || filenameFromVideoUrl(clip.video_url);
+    const [serverVideoFile, setServerVideoFile] = useState(initialServerVideoFile);
     const [subtitleConfig, setSubtitleConfig] = useState(
         clip.subtitle_config || initialState?.subtitle_config || null
     );
@@ -149,13 +159,19 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             setServerVideoFile(serverName);
             setCurrentVideoUrl(serverUrl);
             setSubtitleConfig(clip.subtitle_config || null);
+            setActiveLayers((current) => reconcileActiveLayers(current, serverName));
             setDurableSrc(null);
             setDurableFailed(false);
             setHasPlayed(false);
             if (videoRef.current) videoRef.current.load();
+        } else if (serverName && Object.prototype.hasOwnProperty.call(clip, 'subtitle_config')) {
+            // Same filename can still receive a persisted recipe during status
+            // restore. Update the controls without waiting for a remount.
+            setSubtitleConfig(clip.subtitle_config || null);
+            setActiveLayers((current) => reconcileActiveLayers(current, serverName));
         }
         // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [clip.video_url]);
+    }, [clip.video_url, clip.render_revision, clip.subtitle_config]);
 
     const [platforms, setPlatforms] = useState({
         tiktok: true,
@@ -197,7 +213,9 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     // Accumulate Remotion layers across operations. A reopened project restores
     // the layers persisted in its project state, so the next edit composes over
     // them instead of silently dropping previous browser-side work.
-    const [activeLayers, setActiveLayers] = useState(initialState?.active_layers || { subtitles: null, hook: null, effects: null });
+    const [activeLayers, setActiveLayers] = useState(() =>
+        reconcileActiveLayers(initialState?.active_layers, initialServerVideoFile)
+    );
 
     // Report edit state upward (debounced sync to the project record). Skip the
     // mount run: only user-driven changes are worth persisting.
@@ -233,6 +251,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
         setDurableFailed(false);
         setVideoErrored(false);
         setHasPlayed(false);
+        setActiveLayers((current) => reconcileActiveLayers(current, nextFile));
         if (Object.prototype.hasOwnProperty.call(data, 'subtitle_config')) {
             setSubtitleConfig(data.subtitle_config);
         }
@@ -361,9 +380,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
+                adoptServerVideo(data);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -428,28 +445,11 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             const res = await apiFetch('/api/subtitle', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                    job_id: jobId,
-                    clip_index: index,
-                    position: options.position,
-                    font_size: options.fontSize,
-                    font_name: options.fontName,
-                    font_color: options.fontColor,
-                    border_color: options.borderColor,
-                    border_width: options.borderWidth,
-                    bg_color: options.bgColor,
-                    bg_opacity: options.bgOpacity,
-                    style: options.style || 'classic',
-                    animation: options.animation || 'none',
-                    highlight_color: options.highlightColor || '#FFD700',
-                    effect: options.effect || 'none',
-                    base_opacity: options.baseOpacity ?? 1.0,
-                    uppercase: options.uppercase || false,
-                    input_filename: serverVideoFile,
-                    // Edited caption text (clip-relative ms); null = server
-                    // regenerates from the transcript as before.
-                    words: options.captions || null
-                })
+                body: JSON.stringify(serializeSubtitleRequest(
+                    { ...options, defaults: subtitleDefaults || undefined },
+                    { job_id: jobId, clip_index: index, input_filename: serverVideoFile },
+                    true,
+                ))
             });
 
             if (!res.ok) throw new Error(await res.text());
@@ -514,13 +514,14 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
-                const serverUrl = getApiUrl(data.new_video_url);
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url, { auto_hook: data.burned_hook || null });
+                const serverUrl = adoptServerVideo(data, {
+                    auto_hook: data.burned_hook || null,
+                });
                 setBurnedHook(data.burned_hook?.text ?? payload.text ?? null);
                 // Keep any existing browser-only subtitle/effect layers visible
                 // over the newly durable hook without burning the hook twice.
-                const remaining = { ...activeLayers, hook: null };
+                const nextFile = data.server_file || filenameFromVideoUrl(data.new_video_url);
+                const remaining = reconcileActiveLayers({ ...activeLayers, hook: null }, nextFile);
                 setActiveLayers(remaining);
                 if (remaining.subtitles || remaining.effects) {
                     setCurrentVideoUrl(await renderInBrowser({
@@ -562,9 +563,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             if (!res.ok) throw new Error(await res.text());
             const data = await res.json();
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url, { auto_hook: null });
+                adoptServerVideo(data, { auto_hook: null });
                 setActiveLayers({ ...activeLayers, hook: null });
                 setBurnedHook(null);
                 if (videoRef.current) videoRef.current.load();
@@ -625,9 +624,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             const data = await res.json();
             console.log('[Translate] Success response:', data);
             if (data.new_video_url) {
-                setCurrentVideoUrl(getApiUrl(data.new_video_url));
-                setServerVideoFile(data.new_video_url.split('/').pop());
-                onVideoUpdated?.(index, data.new_video_url);
+                adoptServerVideo(data);
                 if (videoRef.current) {
                     videoRef.current.load();
                 }
@@ -1128,6 +1125,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 clipIndex={index}
                 existingHook={activeLayers.hook}
                 existingSubtitles={subtitleConfig}
+                subtitleDefaults={subtitleDefaults}
             />
 
             <HookModal

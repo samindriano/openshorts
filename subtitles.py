@@ -255,27 +255,156 @@ def resolve_render_style(style="classic", animation="none", effect="none"):
 SAFE_MARGIN_V = 43
 
 
-# The caption look applied automatically to every generated clip. Chosen by
-# rendering four candidates on a real clip and comparing them (25-jul-2026):
-# white Anton uppercase with a yellow active word, heavy black outline, gentle
-# pop. Yellow because it is the one colour that almost never occurs in footage,
-# so the active word reads instantly on any background; the base text stays
-# fully opaque (dimming it tested worse over bright scenes). This is a starting
-# point, not a cage — the subtitle modal still overrides every field.
-AUTO_CAPTION_STYLE = {
+# The caption look applied automatically to every generated clip. Keep this
+# flat camelCase object as the public recipe contract: the API, metadata,
+# project-state journal, modal, and Remotion preview all use the same fields.
+# The old code had four separate defaults (main.py, SubtitleRequest, the modal,
+# and Remotion), which made a reopen or Apply All silently change the render.
+# Chosen by rendering four candidates on a real clip and comparing them
+# (25-jul-2026): white Anton uppercase with a yellow active word, heavy black
+# outline, gentle pop.
+CANONICAL_SUBTITLE_DEFAULTS = {
+    "position": "bottom",
+    "fontSize": 36,
+    "fontName": "Anton",
+    "fontColor": "#FFFFFF",
+    "highlightColor": "#FFE500",
+    "borderColor": "#000000",
+    "borderWidth": 3,
+    "bgColor": "#000000",
+    "bgOpacity": 0.0,
     "style": "karaoke",
-    "alignment": "bottom",
-    "font_name": "Anton",
-    "font_size": 36,
-    "font_color": "#FFFFFF",
-    "highlight_color": "#FFE500",
-    "border_color": "#000000",
-    "border_width": 3,
+    "animation": "pop",
     "effect": "pop",
-    "base_opacity": 1.0,
+    "baseOpacity": 1.0,
     "uppercase": True,
-    "max_chars": 20,
-    "max_duration": 1.6,
+}
+
+AUTO_CAPTION_LIMITS = {"max_chars": 20, "max_duration": 1.6}
+
+
+def _recipe_value(raw, camel, snake=None):
+    """Read a canonical field while accepting old internal snake_case data."""
+    if not isinstance(raw, dict):
+        return None
+    if camel in raw:
+        return raw[camel]
+    if snake and snake in raw:
+        return raw[snake]
+    return None
+
+
+def canonical_subtitle_config(raw=None, captions=None):
+    """Return a validated, stable public subtitle recipe.
+
+    ``raw`` may be a persisted camelCase recipe or the old snake_case internal
+    style. Unknown keys are deliberately dropped so metadata cannot become a
+    second, undocumented source of renderer behaviour. ``captions`` is only
+    included when explicitly provided; this keeps the automatic recipe small
+    while allowing edited word timings to survive later re-renders.
+    """
+    raw = raw if isinstance(raw, dict) else {}
+    out = dict(CANONICAL_SUBTITLE_DEFAULTS)
+    fields = {
+        "position": "position",
+        "fontSize": "font_size",
+        "fontName": "font_name",
+        "fontColor": "font_color",
+        "highlightColor": "highlight_color",
+        "borderColor": "border_color",
+        "borderWidth": "border_width",
+        "bgColor": "bg_color",
+        "bgOpacity": "bg_opacity",
+        "style": "style",
+        "animation": "animation",
+        "effect": "effect",
+        "baseOpacity": "base_opacity",
+        "uppercase": "uppercase",
+    }
+    for camel, snake in fields.items():
+        value = _recipe_value(raw, camel, snake)
+        if value is not None:
+            out[camel] = value
+
+    if out["position"] not in {"top", "middle", "bottom"}:
+        out["position"] = CANONICAL_SUBTITLE_DEFAULTS["position"]
+    if out["style"] not in {"classic", "karaoke"}:
+        out["style"] = CANONICAL_SUBTITLE_DEFAULTS["style"]
+    if out["animation"] not in {"none", "pop", "word-highlight", "karaoke"}:
+        out["animation"] = "none"
+    if out["effect"] not in {"none", "glow", "pop", "box"}:
+        out["effect"] = "none"
+    try:
+        out["fontSize"] = int(max(10, min(200, float(out["fontSize"]))))
+    except (TypeError, ValueError):
+        out["fontSize"] = CANONICAL_SUBTITLE_DEFAULTS["fontSize"]
+    try:
+        out["borderWidth"] = int(max(0, min(10, float(out["borderWidth"]))))
+    except (TypeError, ValueError):
+        out["borderWidth"] = CANONICAL_SUBTITLE_DEFAULTS["borderWidth"]
+    try:
+        out["bgOpacity"] = max(0.0, min(1.0, float(out["bgOpacity"])))
+    except (TypeError, ValueError):
+        out["bgOpacity"] = CANONICAL_SUBTITLE_DEFAULTS["bgOpacity"]
+    try:
+        out["baseOpacity"] = max(0.05, min(1.0, float(out["baseOpacity"])))
+    except (TypeError, ValueError):
+        out["baseOpacity"] = CANONICAL_SUBTITLE_DEFAULTS["baseOpacity"]
+    out["fontName"] = str(out["fontName"] or "Verdana")
+    for key in ("fontColor", "highlightColor", "borderColor", "bgColor"):
+        value = str(out[key] or "").upper()
+        if not re.match(r"^#[0-9A-F]{6}$", value):
+            value = CANONICAL_SUBTITLE_DEFAULTS[key]
+        out[key] = value
+    out["uppercase"] = bool(out["uppercase"])
+
+    # The UI changes style explicitly when an animation is chosen. This
+    # branch is only a migration for older clients that sent classic+animation;
+    # it keeps the stored recipe equal to what the compatibility renderer burns.
+    if out["style"] == "classic" and out["animation"] != "none":
+        out["style"] = "karaoke"
+        if out["effect"] == "none":
+            out["effect"] = {
+                "pop": "pop", "word-highlight": "glow", "karaoke": "none"
+            }.get(out["animation"], "none")
+    if out["style"] == "classic":
+        out["effect"] = "none"
+        out["baseOpacity"] = 1.0
+        out["uppercase"] = False
+
+    if captions is not None:
+        out["captions"] = [dict(c) for c in captions if isinstance(c, dict)]
+    elif isinstance(raw.get("captions"), list):
+        out["captions"] = [dict(c) for c in raw["captions"]
+                           if isinstance(c, dict)]
+    return out
+
+
+def subtitle_render_options(config=None):
+    """Map the public recipe to the renderer's historical snake_case names."""
+    recipe = canonical_subtitle_config(config)
+    return {
+        "style": recipe["style"],
+        "alignment": recipe["position"],
+        "font_name": recipe["fontName"],
+        "font_size": recipe["fontSize"],
+        "font_color": recipe["fontColor"],
+        "highlight_color": recipe["highlightColor"],
+        "border_color": recipe["borderColor"],
+        "border_width": recipe["borderWidth"],
+        "bg_color": recipe["bgColor"],
+        "bg_opacity": recipe["bgOpacity"],
+        "effect": recipe["effect"],
+        "base_opacity": recipe["baseOpacity"],
+        "uppercase": recipe["uppercase"],
+        **AUTO_CAPTION_LIMITS,
+    }
+
+
+# Internal renderer shape retained for callers/tests that inspect the chosen
+# default, derived from the canonical contract rather than duplicated values.
+AUTO_CAPTION_STYLE = {
+    **subtitle_render_options(CANONICAL_SUBTITLE_DEFAULTS),
 }
 
 
