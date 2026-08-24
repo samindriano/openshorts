@@ -39,6 +39,14 @@ the pinned `wkaisertexas/tiktok-uploader` `build-uv-v1.7` commit, with no
 automatic retry. A browser exception or an upstream result that cannot confirm
 requested options is `unknown`; inspect TikTok before any manual retry.
 
+The pinned upstream can return `False` after its Post action was already reached
+because it catches a later form-completion exception. OpenShorts therefore maps
+an upstream `False` from a live attempt to `unknown`, never `failed`; validation
+and file checks that happen before the publish boundary remain known failures.
+The Post UI gives one deliberate attempt one stable `request_id`, including
+same-attempt retries after a lost response. An `unknown` result keeps that ID and
+requires explicit acknowledgement before a genuinely new attempt can start.
+
 The adapter passes one initial upload attempt to the upstream API. In this
 upstream version, `num_retries=0` means zero attempts, so it is deliberately
 not used; any second attempt requires an explicit user action.
@@ -57,6 +65,13 @@ The existing `/api/social/post` Upload-Post route is unchanged for hosted mode
 and for existing Instagram/YouTube workflows. This local adapter is TikTok
 only and does not use Upload-Post.
 
+The publisher listens on port `3200` inside the Compose network only; it is not
+published to the host. Check its internal health through the backend container:
+
+```powershell
+docker compose exec backend python -c "import json,urllib.request; print(json.load(urllib.request.urlopen('http://publisher:3200/health')))"
+```
+
 ## Common states and maintenance
 
 - `ready`: a local session file exists and no request is busy. TikTok may still
@@ -64,7 +79,7 @@ only and does not use Upload-Post.
 - `login_required`: add or replace the Netscape cookie file before a live
   attempt.
 - `busy`: one request is in flight; the UI does not start another one.
-- `failed`: the uploader reported a known failure.
+- `failed`: a known preflight/validation failure was proven before the publish boundary.
 - `unknown`: TikTok may have accepted the upload or an option may be
   unconfirmed. Inspect TikTok before any manual retry.
 

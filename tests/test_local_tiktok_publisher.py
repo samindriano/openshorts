@@ -1,8 +1,10 @@
+import asyncio
 import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import httpx
 import pytest
 
 import local_tiktok_publisher as contract
@@ -119,7 +121,7 @@ def test_invalid_product_id_is_rejected():
         )
 
 
-def test_live_success_and_known_failure_are_normalized(tmp_path, monkeypatch):
+def test_live_success_and_upstream_false_are_normalized(tmp_path, monkeypatch):
     root = tmp_path / "output"
     path = root / "job-1" / "clip.mp4"
     digest = _write(path, b"actual")
@@ -141,7 +143,37 @@ def test_live_success_and_known_failure_are_normalized(tmp_path, monkeypatch):
 
     req_failed = req.model_copy(update={"request_id": "live-failed"})
     monkeypatch.setattr(publisher, "_adapter_upload", lambda *args, **kwargs: False)
-    assert publisher.publish(req_failed)["state"] == "failed"
+    assert publisher.publish(req_failed)["state"] == "unknown"
+
+
+def test_upstream_false_is_unknown_and_same_attempt_does_not_retry(tmp_path, monkeypatch):
+    root = tmp_path / "output"
+    path = root / "job-1" / "clip.mp4"
+    digest = _write(path, b"actual")
+    data_dir = tmp_path / "publisher-data"
+    cookie = data_dir / "tiktok-cookies.txt"
+    cookie.parent.mkdir(parents=True)
+    cookie.write_text("secret-cookie", encoding="utf-8")
+    monkeypatch.setattr(publisher, "OUTPUT_DIR", root)
+    monkeypatch.setattr(publisher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(publisher, "STATE_FILE", data_dir / "state.json")
+    monkeypatch.setattr(publisher, "COOKIE_FILE", cookie)
+    calls = []
+    monkeypatch.setattr(publisher, "_adapter_upload", lambda *args, **kwargs: calls.append(1) or False)
+    req = publisher.PublishRequest(
+        request_id="upstream-false", job_id="job-1", clip_index=0,
+        video_path="/output/job-1/clip.mp4", source_identity="/videos/job-1/clip.mp4",
+        source_sha256=digest, dry_run=False,
+    )
+
+    first = publisher.publish(req)
+    second = publisher.publish(req)
+
+    assert first["state"] == "unknown"
+    assert second["state"] == "unknown"
+    assert second["duplicate"] is True
+    assert len(calls) == 1
+    assert "retrying" in first["error"].lower()
 
 
 def test_expired_session_is_login_required_without_leaking_cookie(tmp_path, monkeypatch):
@@ -203,3 +235,73 @@ def test_unknown_is_persisted_and_duplicate_does_not_retry(tmp_path, monkeypatch
     assert second["duplicate"] is True
     assert len(calls) == 1
     assert "secret-cookie" not in (data_dir / "state.json").read_text(encoding="utf-8")
+
+
+def test_publisher_service_is_internal_only():
+    compose = (Path(__file__).parents[1] / "docker-compose.yml").read_text(encoding="utf-8")
+    service = compose.split("\n  publisher:", 1)[1]
+    assert "ports:" not in service
+    assert "3200:3200" not in service
+
+
+def test_backend_forwards_one_request_id_and_publisher_executes_once(tmp_path, monkeypatch):
+    pytest.importorskip("boto3", reason="backend integration test runs in the backend container")
+    import app as app_module
+
+    job_id = "integration-job"
+    root = tmp_path / "output"
+    path = root / job_id / "clip.mp4"
+    digest = _write(path, b"authoritative-current-mp4")
+    data_dir = tmp_path / "publisher-data"
+    cookie = data_dir / "tiktok-cookies.txt"
+    cookie.parent.mkdir(parents=True)
+    cookie.write_text("secret-cookie", encoding="utf-8")
+
+    monkeypatch.setattr(app_module, "BILLING_ENABLED", False)
+    monkeypatch.setattr(app_module, "OUTPUT_DIR", str(root))
+    monkeypatch.setitem(app_module.jobs, job_id, {
+        "status": "completed",
+        "result": {"clips": [{"video_url": f"/videos/{job_id}/clip.mp4", "video_description_for_tiktok": "Caption"}]},
+    })
+
+    monkeypatch.setattr(publisher, "OUTPUT_DIR", root)
+    monkeypatch.setattr(publisher, "DATA_DIR", data_dir)
+    monkeypatch.setattr(publisher, "STATE_FILE", data_dir / "state.json")
+    monkeypatch.setattr(publisher, "COOKIE_FILE", cookie)
+    calls = []
+    monkeypatch.setattr(publisher, "_adapter_upload", lambda *args, **kwargs: calls.append(1) or True)
+
+    class PublisherBridge:
+        async def publish(self, clip, req, caption):
+            payload = req.model_dump()
+            payload.update({
+                "video_path": f"/output/{req.job_id}/{clip.filename}",
+                "source_identity": clip.source_identity,
+                "source_sha256": clip.sha256,
+            })
+            return publisher.publish(publisher.PublishRequest(**payload))
+
+    monkeypatch.setattr(app_module, "LocalTikTokPublisherClient", PublisherBridge)
+
+    request = {
+        "job_id": job_id,
+        "clip_index": 0,
+        "caption": "Caption",
+        "dry_run": False,
+        "request_id": "attempt-A",
+    }
+    async def exercise():
+        transport = httpx.ASGITransport(app=app_module.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            first = await client.post("/api/local/tiktok/publish", json=request)
+            second = await client.post("/api/local/tiktok/publish", json=request)
+        return first, second
+
+    first, second = asyncio.run(exercise())
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+    assert first.json()["state"] == "success"
+    assert second.json()["state"] == "success"
+    assert second.json()["duplicate"] is True
+    assert len(calls) == 1

@@ -21,6 +21,21 @@ const PLATFORM_OPTIONS = [
     { value: 'youtube', label: 'YouTube', icon: <Youtube size={16} /> },
 ];
 
+function newLocalPublishRequestId() {
+    if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+    return `local-tiktok-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function readLocalPublishAttempt(key) {
+    if (typeof window === 'undefined' || !key) return null;
+    try {
+        const value = JSON.parse(window.sessionStorage.getItem(key) || 'null');
+        return value?.request_id ? value : null;
+    } catch {
+        return null;
+    }
+}
+
 function clipDurationSeconds(clip) {
     // A recut clip's start/end are the covering source range (segments may be
     // non-contiguous or reordered); its real duration is the segment sum.
@@ -193,6 +208,26 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
     const [posting, setPosting] = useState(false);
     const [postResult, setPostResult] = useState(null);
     const [copied, setCopied] = useState(null);
+    // A request id belongs to one deliberate local-publisher attempt. Keep a
+    // pending/unknown attempt across a refresh in this tab so a lost response
+    // cannot turn a retry into a second TikTok post.
+    const localPublishAttemptKey = `openshorts:local-tiktok:${jobId}:${index}`;
+    const [localPublishAttempt, setLocalPublishAttempt] = useState(() =>
+        readLocalPublishAttempt(localPublishAttemptKey)
+    );
+    useEffect(() => {
+        if (typeof window === 'undefined') return;
+        try {
+            if (localPublishAttempt) {
+                window.sessionStorage.setItem(localPublishAttemptKey, JSON.stringify(localPublishAttempt));
+            } else {
+                window.sessionStorage.removeItem(localPublishAttemptKey);
+            }
+        } catch {
+            // Session storage is only a safety enhancement; in-memory state still
+            // keeps same-tab retries on the same request id.
+        }
+    }, [localPublishAttempt, localPublishAttemptKey]);
 
     const handleCopy = async (field, text) => {
         try {
@@ -698,8 +733,24 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             return;
         }
 
+        if (localTikTokMode && localPublishAttempt?.state === 'unknown') {
+            setPostResult({
+                success: false,
+                state: 'unknown',
+                msg: 'Outcome is unknown. Inspect TikTok first, then explicitly start a new attempt if needed.',
+            });
+            return;
+        }
+
         setPosting(true);
         setPostResult(null);
+        const requestId = localTikTokMode
+            ? (localPublishAttempt?.request_id || newLocalPublishRequestId())
+            : null;
+        let discardLocalAttempt = false;
+        if (localTikTokMode) {
+            setLocalPublishAttempt({ request_id: requestId, state: 'pending' });
+        }
 
         try {
             const payload = {
@@ -732,6 +783,7 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                 allow_duet: allowDuet,
                 allow_stitch: allowStitch,
                 dry_run: dryRun,
+                request_id: requestId,
             };
 
             const res = await apiFetch(localTikTokMode ? '/api/local/tiktok/publish' : '/api/social/post', {
@@ -741,6 +793,12 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             });
 
             if (!res.ok) {
+                if (localTikTokMode && res.status >= 400 && res.status < 500) {
+                    // Backend validation/preflight proved the publish boundary
+                    // was not crossed, so this attempt can be started afresh.
+                    discardLocalAttempt = true;
+                    setLocalPublishAttempt(null);
+                }
                 const errText = await res.text();
                 try {
                     const jsonErr = JSON.parse(errText);
@@ -752,13 +810,19 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
 
             const data = await res.json().catch(() => ({}));
             if (localTikTokMode) {
+                const state = data.state || 'unknown';
                 const messages = {
                     success: dryRun ? "Dry-run passed: current MP4, caption, and options verified." : "TikTok publisher confirmed the upload.",
                     login_required: "TikTok login is required. Add the local session before publishing.",
                     unknown: "Outcome is unknown. Inspect TikTok before retrying; no automatic retry was made.",
                     failed: "TikTok publisher reported a failure.",
                 };
-                setPostResult({ success: data.state === 'success', msg: messages[data.state] || `Publisher state: ${data.state || 'unknown'}` });
+                if (state === 'unknown') {
+                    setLocalPublishAttempt({ request_id: requestId, state });
+                } else {
+                    setLocalPublishAttempt(null);
+                }
+                setPostResult({ success: state === 'success', state, msg: messages[state] || `Publisher state: ${state}` });
             } else {
                 setPostResult({ success: true, msg: isScheduling ? "Scheduled successfully!" : "Posted successfully!" });
                 setTimeout(() => {
@@ -768,7 +832,17 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
             }
 
         } catch (e) {
-            setPostResult({ success: false, msg: `Failed: ${e.message}` });
+            if (localTikTokMode) {
+                // A network/5xx error can mean the publisher already completed.
+                // Keep the id so a retry asks the publisher for the existing
+                // result instead of invoking TikTok with a fresh id.
+                if (!discardLocalAttempt) {
+                    setLocalPublishAttempt({ request_id: requestId, state: 'pending' });
+                }
+                setPostResult({ success: false, state: 'pending', msg: `Request did not complete. Retry uses the same request ID: ${e.message}` });
+            } else {
+                setPostResult({ success: false, msg: `Failed: ${e.message}` });
+            }
         } finally {
             setPosting(false);
         }
@@ -1048,6 +1122,13 @@ export default function ResultCard({ clip, index, jobId, durable, uploadPostKey,
                     noAccountsConnected ? (
                         <button onClick={handleConnectAccounts} className="btn-primary w-full">
                             <Link2 size={16} /> Connect Accounts
+                        </button>
+                    ) : localTikTokMode && localPublishAttempt?.state === 'unknown' ? (
+                        <button
+                            onClick={() => { setLocalPublishAttempt(null); setPostResult(null); }}
+                            className="btn-primary w-full"
+                        >
+                            <Share2 size={16} /> I inspected TikTok — start new attempt
                         </button>
                     ) : (
                         <button

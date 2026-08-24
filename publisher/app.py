@@ -351,9 +351,14 @@ def publish(req: PublishRequest) -> dict[str, Any]:
         # failures internally.  Do not claim a fully confirmed success when a
         # requested option cannot be independently verified.
         option_confirmation = not req.product_id and req.allow_comments and req.allow_duet and req.allow_stitch
-        record["state"] = "success" if ok and option_confirmation else ("unknown" if ok else "failed")
+        # The pinned upstream catches exceptions from complete_upload_form()
+        # and reports those videos in its failed list.  upload_video() therefore
+        # returns False even when _post_video() may already have clicked Post.
+        # False is consequently ambiguous for a live attempt and must never be
+        # treated as a safe-to-retry failure.
+        record["state"] = "success" if ok and option_confirmation else "unknown"
         if not ok:
-            record["error"] = "TikTok uploader did not confirm completion"
+            record["error"] = "TikTok uploader did not confirm completion; inspect TikTok before retrying."
         elif not option_confirmation:
             record["error"] = "TikTok upload returned, but requested options have no independent confirmation"
         record["updated_at"] = datetime.now(timezone.utc).isoformat()
